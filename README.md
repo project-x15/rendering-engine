@@ -196,8 +196,8 @@ Returns a Hono app. The app handles four kinds of requests.
 | `tvPath` | `'/tv'` | Direct TV shell URL |
 | `detectMode` | built-in detector | Override mode detection |
 | `getEnv` | `() => ({})` | Resolve per-request env |
-| `configLoader` | none | Async function returning global config |
-| `maxDataSize` | unlimited | Hard cap on `__DATA__` in bytes |
+| `configLoader` | none | Async config fetcher; receives an optional `AbortSignal` for timeout cancellation |
+| `maxDataSize` | 524288 (512KB) | Hard cap on `__DATA__` in bytes. Set to `Infinity` to disable |
 | `serveStatic` | none | Static asset middleware factory (Node, Bun, Deno) |
 
 ### Route object
@@ -214,7 +214,7 @@ Returns a Hono app. The app handles four kinds of requests.
 
 `getData` receives a `RequestContext` with `params`, `request`, `mode`, `env`, and `config`. Return only the data the page needs. Returning the full config object embeds megabytes into every HTML response.
 
-`beforeRender` runs after data is fetched but before the component renders. Use it for side effects like analytics.
+`beforeRender` runs after data is fetched but before the component renders. Use it for side effects like analytics. If it throws, the error is logged and the render continues — a failing analytics call does not take down the page.
 
 `onError` catches errors from `getData`. Return a fallback data object. Without it, the engine renders `{ error: message }`.
 
