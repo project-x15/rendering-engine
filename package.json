@@ -1,0 +1,32 @@
+{
+  "name": "@x15/engine",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@hono/node-server": "^2.0.0",
+    "@preact/signals": "^1.0.0",
+    "hono": "^4.0.0",
+    "preact": "^10.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@hono/node-server": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "preact-render-to-string": "^6.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  },
+  "sideEffects": false
+}
