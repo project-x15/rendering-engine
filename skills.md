@@ -1,5 +1,5 @@
 ---
-name: rendering-engine
+name: @project-x15/rendering-engine
 description: Dual-mode SSR/CSR rendering engine for streaming apps on Hono + Preact. Targets Cloudflare Workers first, runs on Node.js, Bun, and Deno. Skills cover Hono routing, Preact SSR, Workers isolate lifecycle, Cache API, deterministic simulation testing, config cache state machine, mode detection, HTML security, and route matching.
 version: 0.1.0
 language: typescript
@@ -23,7 +23,7 @@ tags:
   - cloudflare-workers
 ---
 
-# rendering-engine skills
+# @project-x15/rendering-engine skills
 
 What you need to know to work on this codebase effectively.
 

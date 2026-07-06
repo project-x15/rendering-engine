@@ -1,4 +1,4 @@
-# rendering-engine
+# @project-x15/rendering-engine
 
 Dual-mode rendering engine for streaming apps.
 SSR for web browsers, CSR shell for 2015-era smart TVs (Tizen, WebOS, Roku).

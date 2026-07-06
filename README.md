@@ -1,4 +1,4 @@
-# rendering-engine
+# @project-x15/rendering-engine
 
 **Alpha.** The API will change. Don't build a product on this yet.
 
@@ -42,7 +42,7 @@ No `serveStatic` needed. Wrangler serves static assets from the `[assets]` direc
 
 ```ts
 import { h } from 'preact'
-import { createApp } from 'rendering-engine'
+import { createApp } from '@project-x15/rendering-engine'
 
 const Home = () => h('div', null, 'Hello')
 
@@ -79,7 +79,7 @@ Pass `serveStatic` from `@hono/node-server`. The engine uses it to register the 
 import { h } from 'preact'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { createApp } from 'rendering-engine'
+import { createApp } from '@project-x15/rendering-engine'
 
 const Home = () => h('div', null, 'Hello')
 
@@ -108,7 +108,7 @@ Bun supports `@hono/node-server` out of the box, so the Node.js example works as
 ```ts
 import { h } from 'preact'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { createApp } from 'rendering-engine'
+import { createApp } from '@project-x15/rendering-engine'
 
 const app = createApp({
   routes: [{ path: '/', component: () => h('div', null, 'Hello') }],
@@ -131,7 +131,7 @@ Deno has its own file API. Write a small `serveStatic` wrapper:
 
 ```ts
 import { h } from 'preact'
-import { createApp } from 'rendering-engine'
+import { createApp } from '@project-x15/rendering-engine'
 import type { MiddlewareHandler } from 'hono'
 
 const serveStatic = (opts: { root: string }): MiddlewareHandler =>
