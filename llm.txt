@@ -1,0 +1,123 @@
+# rendering-engine
+
+Dual-mode rendering engine for streaming apps.
+SSR for web browsers, CSR shell for 2015-era smart TVs (Tizen, WebOS, Roku).
+Built on Hono + Preact. Runs on Cloudflare Workers, Node.js, Bun, and Deno.
+
+GitHub: https://github.com/project-x15/rendering-engine
+
+## Structure
+
+src/
+  index.ts    barrel exports
+  app.ts      createApp() - Hono app factory, wires all routes
+  config.ts   createConfigLoader() - L1 in-memory + L2 Cache API, dedup
+  mode.ts     detectMode() - 4-signal TV/web detection
+  router.ts   matchRoute() - path matching with :params, no wildcards
+  html.ts     ssrTemplate() + csrShell() - HTML templates, XSS escaping
+  types.ts    Mode, Route, RequestContext, AppOptions, etc.
+
+test/
+  app.test.ts          integration: SSR, CSR, /api/data, config, errors
+  config.test.ts       config loader cache + dedup
+  mode.test.ts         mode detection signals
+  router.test.ts       path matching, params, edge cases
+  html.test.ts         template output, XSS escaping
+  defaults.test.ts     fallback branch coverage
+  dst.test.ts          deterministic simulation testing (seeded PRNG)
+  large-config.test.ts 3MB config stress tests
+
+530 lines of source. 1930 lines of tests. 99 tests, all passing.
+
+## Public API
+
+createApp(options) -> Hono app
+  options.routes       Route[] (required)
+  options.title        string
+  options.headContent  string (extra <head> HTML)
+  options.configLoader async () => config object
+  options.detectMode   (req) => 'ssr' | 'csr'
+  options.getEnv       (c) => env object
+  options.serveStatic  (opts) => MiddlewareHandler (Node/Bun/Deno, omit on Workers)
+  options.maxDataSize  number (hard cap on __DATA__ bytes)
+  options.assetsRoot   string (default './dist')
+  options.webCssPath   string (default '/web/assets/style.css')
+  options.webJsPath    string (default '/web/assets/client.js')
+  options.tvCssPath    string (default '/tv/assets/style.css')
+  options.tvJsPath     string (default '/tv/assets/app.js')
+  options.tvPath       string (default '/tv')
+
+Route:
+  path        string (e.g. '/show/:id')
+  component   Preact component
+  getData?    (ctx) => page data (serialized into __DATA__)
+  beforeRender? (data) => void (side effects before render)
+  onError?    (err) => fallback data
+
+RequestContext:
+  params    Record<string, string>
+  request   Request
+  mode      'ssr' | 'csr'
+  env       Record<string, unknown>
+  config    Record<string, unknown> (cached global config)
+
+createConfigLoader(fetcher, cacheKey?, ttl?) -> { load, reset }
+detectMode(req) -> 'ssr' | 'csr'
+matchRoute(routes, pathname) -> { route, params } | null
+ssrTemplate(opts) -> HTML string
+csrShell(opts) -> HTML string
+
+## How the engine handles a request
+
+1. Mode detection: detectMode(req) checks query param, cookie, client hint, User-Agent
+2. If CSR (TV): return csrShell (empty #app div + TV JS/CSS links)
+3. If SSR (web): call route.getData(ctx), render component to string, wrap in ssrTemplate
+4. SSR errors: route.onError provides fallback data, component re-renders with error data
+5. /api/data/*: matches route, calls getData with mode='csr', returns JSON
+6. /api/config: returns cached global config as JSON (only if configLoader provided)
+7. Static assets: served if serveStatic option provided (skipped on Workers)
+
+## Config caching
+
+L1: in-memory, instant, deduplicates concurrent calls via shared pending promise
+L2: Cache API (caches.default), survives isolate restarts on Workers
+Failure: pending promise cleared, next call retries (no stale rejection cached)
+reset(): clears L1 only, L2 expires via TTL
+
+## Mode detection priority
+
+1. ?tv=1 or ?web=1 query param
+2. tv-mode=1 or tv-mode=0 cookie
+3. Sec-CH-UA-Platform header (TV keyword)
+4. User-Agent keyword (tizen, webos, roku, appletv, etc.)
+Default: 'ssr'
+
+## Testing
+
+Run: npm test (uses node:test runner)
+99 tests across 8 files
+DST suite: seeded PRNG, reproducibility checks, independent reference model
+Stress suite: 3MB config payloads, concurrent requests, OOM checks
+
+## Key constraints
+
+getData must return only page-specific data, NOT the full ctx.config
+__DATA__ is escaped: </script> replaced with <\/script>
+maxDataSize throws in production, warns in dev (100KB threshold)
+serveStatic is optional: Workers uses wrangler [assets] config instead
+No wildcards in routes, no regex, first match wins
+Malformed percent-encoding returns null, never crashes
+
+## Dependencies
+
+hono ^4.0.0 (peer)
+preact ^10.0.0 (peer)
+@preact/signals ^1.0.0 (peer)
+@hono/node-server ^2.0.0 (optional peer, Node/Bun only)
+preact-render-to-string ^6.5.0 (dependency)
+
+## Conventions
+
+Follow AGENTS.md: simple code, explicit state, small diffs, comments explain why
+No em dashes in prose. Active voice. Contractions. Plain language.
+Test behavior, not implementation. Prefer deterministic tests.
