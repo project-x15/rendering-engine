@@ -1,5 +1,5 @@
 {
-  "name": "@x15/engine",
+  "name": "rendering-engine",
   "version": "0.1.0",
   "type": "module",
   "main": "./src/index.ts",

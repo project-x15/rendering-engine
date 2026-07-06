@@ -1,20 +1,22 @@
-# @x15/engine
+# rendering-engine
+
+**Alpha.** The API will change. Don't build a product on this yet.
 
 Dual-mode rendering engine for streaming apps. Serves server-rendered HTML to web browsers and a client-side shell to 2015-era smart TVs.
 
-Runs as a Hono app. Uses Preact for components and `preact-render-to-string` for SSR. Works on Cloudflare Workers out of the box. Node.js, Bun, and Deno work too with one extra line.
+Runs as a Hono app. Uses Preact for components and `preact-render-to-string` for SSR. Works on Cloudflare Workers out of the box, and Node.js, Bun, and Deno with one extra line.
 
 Not published to npm. Install from GitHub:
 
 ```
-npm install github:project-x15/x15-stack
+npm install github:project-x15/rendering-engine
 ```
 
-Or clone the monorepo and link locally:
+For private repos, this needs git authentication (SSH key or HTTPS token). For local development, clone and link:
 
 ```
-git clone https://github.com/project-x15/x15-stack.git
-cd x15-stack
+git clone https://github.com/project-x15/rendering-engine.git
+cd rendering-engine
 npm install
 ```
 
@@ -40,7 +42,7 @@ No `serveStatic` needed. Wrangler serves static assets from the `[assets]` direc
 
 ```ts
 import { h } from 'preact'
-import { createApp } from '@x15/engine'
+import { createApp } from 'rendering-engine'
 
 const Home = () => h('div', null, 'Hello')
 
@@ -60,14 +62,14 @@ export default createApp({
 ```toml
 # wrangler.toml
 name = "my-app"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-07-01"
 
 [assets]
 directory = "./dist"
 binding = "ASSETS"
 ```
 
-Workers also gets the L2 cache layer for free. The config loader stores fetched config in the Cache API, so it survives isolate restarts. Node.js and Bun only get L1 (in-memory).
+Workers also gets the L2 cache layer for free. The config loader stores fetched config in the Cache API, so it survives isolate restarts. Node.js, Bun, and Deno only get L1 (in-memory).
 
 ### Node.js
 
@@ -77,7 +79,7 @@ Pass `serveStatic` from `@hono/node-server`. The engine uses it to register the 
 import { h } from 'preact'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { createApp } from '@x15/engine'
+import { createApp } from 'rendering-engine'
 
 const Home = () => h('div', null, 'Hello')
 
@@ -97,7 +99,7 @@ const app = createApp({
 serve(app)
 ```
 
-Install the peer dep: `npm install @hono/node-server` (or `bun add`, `deno add npm:`).
+Install the peer dep: `npm install @hono/node-server` (or `bun add @hono/node-server`, `deno add npm:@hono/node-server`).
 
 ### Bun
 
@@ -106,7 +108,7 @@ Bun supports `@hono/node-server` out of the box, so the Node.js example works as
 ```ts
 import { h } from 'preact'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { createApp } from '@x15/engine'
+import { createApp } from 'rendering-engine'
 
 const app = createApp({
   routes: [{ path: '/', component: () => h('div', null, 'Hello') }],
@@ -129,7 +131,7 @@ Deno has its own file API. Write a small `serveStatic` wrapper:
 
 ```ts
 import { h } from 'preact'
-import { createApp } from '@x15/engine'
+import { createApp } from 'rendering-engine'
 import type { MiddlewareHandler } from 'hono'
 
 const serveStatic = (opts: { root: string }): MiddlewareHandler =>
@@ -206,7 +208,7 @@ Returns a Hono app. The app handles four kinds of requests.
 
 ### `createConfigLoader(fetcher, cacheKey?, ttl?)`
 
-Creates a config loader with two cache layers. L1 is an in-memory cache that deduplicates concurrent calls. L2 is the Cache API, which survives isolate restarts on Cloudflare Workers. On Node.js, Bun, and Deno, only L1 is available.
+Creates a config loader with two cache layers. L1 is an in-memory cache that deduplicates concurrent calls, and L2 is the Cache API, which survives isolate restarts on Cloudflare Workers. On Node.js, Bun, and Deno, only L1 is available.
 
 ```ts
 const loader = createConfigLoader(async () => fetchConfig())
@@ -220,11 +222,11 @@ Returns `'ssr'` or `'csr'`. Checks query params, cookies, client hints, and User
 
 ### `matchRoute(routes, pathname)`
 
-Matches a pathname against the route table. Supports exact paths, static paths, and `:param` segments. Returns `{ route, params }` or `null`. Trailing slashes are normalized. Malformed percent-encoding returns `null` instead of crashing.
+Matches a pathname against the route table. Supports exact paths, static paths, and `:param` segments, and returns `{ route, params }` or `null`. Trailing slashes are normalized, and malformed percent-encoding returns `null` instead of crashing.
 
 ### `ssrTemplate(opts)` / `csrShell(opts)`
 
-Low-level HTML template functions. `ssrTemplate` wraps rendered HTML with `__DATA__` and asset links. `csrShell` produces the empty TV shell. Both escape `</script>` in data to prevent XSS.
+Low-level HTML template functions. `ssrTemplate` wraps rendered HTML with `__DATA__` and asset links, and `csrShell` produces the empty TV shell. Both escape `</script>` in data to prevent XSS.
 
 ---
 
@@ -242,7 +244,7 @@ The `reset()` method clears L1 only. L2 expires via its TTL or is overwritten on
 
 The test suite uses Node's built-in test runner. Run it with `npm test`.
 
-The engine includes a Deterministic Simulation Testing suite. It generates random sequences of page requests, API calls, config resets, and failure injections from a fixed seed. Every scenario runs twice and the traces are deep-compared. Invariants are checked on every step against an independent reference model, not just at the end.
+The engine has a Deterministic Simulation Testing suite. It generates random sequences of page requests, API calls, config resets, and failure injections from a fixed seed. Every scenario runs twice, traces are deep-compared, and invariants are checked on every step against an independent reference model.
 
 This catches bugs that unit tests miss: race conditions in the config dedup, state leaks across requests, and subtle interactions between mode detection and error handling.
 
@@ -250,6 +252,6 @@ This catches bugs that unit tests miss: race conditions in the config dedup, sta
 
 ## What the engine doesn't do
 
-It doesn't build your client bundle. It doesn't handle authentication, sessions, or database connections. It doesn't provide a CLI, a dev server with hot reload, or a plugin system. It renders pages and serves data. That's it.
+It doesn't build your client bundle, handle auth or sessions, or give you a CLI, dev server, or plugin system. It renders pages and serves data. That's it.
 
-The engine is 400 lines of source code across seven files. Every line earns its keep.
+The engine is 530 lines across seven files. Every line earns its keep.
