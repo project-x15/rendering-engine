@@ -45,7 +45,9 @@ test('configLoader: reset clears L1 so next load refetches', async () => {
 
 test('configLoader: fetch error does not cache failure', async () => {
   let calls = 0
-  const loader = createConfigLoader(async () => { calls++; throw new Error('down') })
+  const loader = createConfigLoader(async () => { calls++; throw new Error('down') }, {
+    circuitBreakerCooldownMs: 0,
+  })
   await assert.rejects(() => loader.load(), { message: 'down' })
   await assert.rejects(() => loader.load(), { message: 'down' })
   assert.equal(calls, 2)

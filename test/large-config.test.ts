@@ -290,8 +290,8 @@ test('large-config: SSR with config-pass-through getData warns but works', async
   const app = createApp({
     routes,
     configLoader: async () => largeConfig,
+    maxDataSize: 10_000_000, // allow passthrough — default 512KB would catch this
   })
-
   const res = await app.fetch(
     new Request('http://localhost/leak', { headers: { 'user-agent': 'Mozilla/5.0' } }),
   )
@@ -713,6 +713,7 @@ test('large-config: maxConfigSize error clears pending so retry works', async ()
     return { small: 'config' } // small enough
   }, {
     maxConfigSize: 1024,
+    circuitBreakerCooldownMs: 0,
   })
 
   // First call — rejected (config too big)
@@ -773,7 +774,7 @@ test('large-config: configTimeout clears pending so retry works', async () => {
       if (calls === 1) await new Promise((r) => setTimeout(r, 200)) // slow
       return { theme: 'dark' }
     },
-    { configTimeout: 50 },
+    { configTimeout: 50, circuitBreakerCooldownMs: 0 },
   )
 
   // First call — timeout

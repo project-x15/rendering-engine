@@ -269,6 +269,7 @@ function buildRun() {
     headContent: '<meta name="dst" content="1">',
     configLoader: fetcher,
     getEnv,
+    circuitBreakerCooldownMs: 0,
   })
   return { app, world }
 }

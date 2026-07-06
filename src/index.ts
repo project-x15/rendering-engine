@@ -5,6 +5,7 @@ export { matchRoute } from './router.js'
 export { ssrTemplate, csrShell } from './html.js'
 
 export type {
+  Logger,
   Mode,
   Route,
   RequestContext,

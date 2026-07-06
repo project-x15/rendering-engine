@@ -31,6 +31,7 @@ function makeApp(overrides: Partial<AppOptions> = {}): ReturnType<typeof createA
     headContent: '<meta name="test" content="engine">',
     getEnv: () => ({ MOCK_MODE: 'test' }),
     configLoader: async () => ({ theme: 'dark' }),
+    circuitBreakerCooldownMs: 0,
     ...overrides,
   })
 }
