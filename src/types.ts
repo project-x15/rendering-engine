@@ -71,6 +71,26 @@ export interface AppOptions {
   /** Global config fetcher. Result is cached and passed to every getData via ctx.config. */
   configLoader?: () => Promise<Record<string, unknown>>
   /**
+   * Optional selector to filter which config keys /api/config exposes to TV clients.
+   * `ctx.config` in getData still gets the full config (unchanged).
+   * Only the /api/config endpoint uses the selector.
+   * No selector → returns full config (backward compat).
+   */
+  configSelector?: (config: Record<string, unknown>) => Record<string, unknown>
+  /**
+   * Hard cap on config size in bytes.
+   * If fetched config exceeds this, load() rejects with a size error.
+   * App degrades to {} config gracefully (existing path).
+   * Default: no limit.
+   */
+  maxConfigSize?: number
+  /**
+   * Timeout in ms for the config fetcher.
+   * If Contentful is slow, fail fast. Next request retries.
+   * Default: no timeout.
+   */
+  configTimeout?: number
+  /**
    * Max allowed size (bytes) for SSR __DATA__ on any single route.
    * When exceeded, the engine logs a warning (dev) or throws (production).
    * Default: unlimited.

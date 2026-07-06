@@ -40,7 +40,10 @@ export function createApp(options: AppOptions): HonoApp {
 
   // Config loader with cache (persists across requests on same isolate/process)
   const config: ConfigLoader<Record<string, unknown>> | null = options.configLoader
-    ? createConfigLoader(options.configLoader)
+    ? createConfigLoader(options.configLoader, {
+        maxConfigSize: options.maxConfigSize,
+        configTimeout: options.configTimeout,
+      })
     : null
 
   function resolveEnv(c: Context): Record<string, unknown> {
@@ -63,7 +66,11 @@ export function createApp(options: AppOptions): HonoApp {
   if (config) {
     app.get('/api/config', (c) => {
       return config.load()
-        .then((cfg) => c.json(cfg))
+        .then((cfg) => {
+          // Apply configSelector if provided — TV clients get trimmed payload
+          const selected = options.configSelector ? options.configSelector(cfg) : cfg
+          return c.json(selected)
+        })
         .catch((err: Error) => c.json({ error: err.message }, 500))
     })
   }

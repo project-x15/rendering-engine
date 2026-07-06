@@ -8,11 +8,36 @@
  * On Node.js: L1 only (caches is undefined). Process persists so L1 is sufficient.
  *
  * Dedup: concurrent calls share the same pending promise (L1 only).
+ *
+ * On Cloudflare Workers, the Cache API has a 4MB per-entry limit.
+ * Configs larger than 4MB will not persist across isolate restarts (L2).
+ * L1 (in-memory) still works within the current isolate's lifetime.
  */
 
 export interface ConfigLoader<T> {
   load: () => Promise<T>
   reset: () => void
+}
+
+export interface ConfigLoaderOptions {
+  /** Cache key for L2 (Cache API). Default: 'https://x15-engine/config' */
+  cacheKey?: string
+  /** L2 Cache-Control max-age in seconds. Default: 3600 */
+  ttl?: number
+  /**
+   * Hard cap on config size in bytes.
+   * If fetched config exceeds this, load() rejects with a size error.
+   * App degrades to {} config gracefully (existing path).
+   * Default: no limit.
+   */
+  maxConfigSize?: number
+  /**
+   * Timeout in ms for the fetcher.
+   * If fetcher takes longer, load() rejects with a timeout error.
+   * On timeout, pending is cleared so next request retries.
+   * Default: no timeout.
+   */
+  configTimeout?: number
 }
 
 // Cloudflare Workers extends CacheStorage with a 'default' Cache instance.
@@ -28,9 +53,13 @@ function hasCacheApi(): boolean {
 
 export function createConfigLoader<T>(
   fetcher: () => Promise<T>,
-  cacheKey = 'https://x15-engine/config',
-  ttl = 3600
+  options?: ConfigLoaderOptions
 ): ConfigLoader<T> {
+  const cacheKey = options?.cacheKey ?? 'https://x15-engine/config'
+  const ttl = options?.ttl ?? 3600
+  const maxConfigSize = options?.maxConfigSize
+  const configTimeout = options?.configTimeout
+
   let cached: T | null = null
   let pending: Promise<T> | null = null
 
@@ -43,7 +72,19 @@ export function createConfigLoader<T>(
 
   async function storeInCacheApi(config: T): Promise<void> {
     if (!hasCacheApi()) return
-    const res = new Response(JSON.stringify(config), {
+
+    // Warn when config approaches Workers Cache API 4MB limit
+    const json = JSON.stringify(config)
+    const sizeBytes = new TextEncoder().encode(json).length
+    const sizeMB = (sizeBytes / 1024 / 1024).toFixed(2)
+    if (sizeBytes > 3_000_000) {
+      console.warn(
+        `config: size ${sizeMB}MB exceeds 3MB — ` +
+        `Cache API (L2) may reject entries >4MB`
+      )
+    }
+
+    const res = new Response(json, {
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'max-age=' + ttl,
@@ -68,7 +109,34 @@ export function createConfigLoader<T>(
         }
 
         // Cache miss — fetch from origin
-        const config = await fetcher()
+        // Wrap fetcher with timeout if configured
+        let config: T
+        if (configTimeout !== undefined) {
+          config = await Promise.race([
+            fetcher(),
+            new Promise<T>((_, reject) =>
+              setTimeout(() => reject(new Error(
+                `config: fetcher timed out after ${configTimeout}ms`
+              )), configTimeout)
+            ),
+          ])
+        } else {
+          config = await fetcher()
+        }
+
+        // Check maxConfigSize after fetch, before storing in cache
+        if (maxConfigSize !== undefined) {
+          const json = JSON.stringify(config)
+          const sizeBytes = new TextEncoder().encode(json).length
+          if (sizeBytes > maxConfigSize) {
+            const sizeMB = (sizeBytes / 1024 / 1024).toFixed(2)
+            const limitMB = (maxConfigSize / 1024 / 1024).toFixed(2)
+            throw new Error(
+              `config: size ${sizeMB}MB (${sizeBytes} bytes) exceeds ` +
+              `maxConfigSize of ${limitMB}MB (${maxConfigSize} bytes)`
+            )
+          }
+        }
 
         // Store in L2 (Cache API) — fire and forget, but surface failures
         storeInCacheApi(config).catch((err) => console.warn('config: L2 cache write failed', err))
