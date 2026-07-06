@@ -349,26 +349,25 @@ async function simulate(ops: Op[]): Promise<{ steps: Step[]; world: World }> {
         assert.ok(matched, 'SSR: sampled path must match a route')
         const tag = routeTagFor(op.path)!
         const cfgRes = predictConfig(sim)
-        if (cfgRes.ok) {
-          if (tag === 'flaky' || tag === 'guarded') {
-            // getData throws → error path
-            if (tag === 'guarded') {
-              payload = { recovered: true, msg: 'nope' }
-            } else {
-              payload = { error: 'boom' }
-            }
-          } else if (tag === 'static') {
-            payload = {}
+        // Config is optional data: a failed load degrades to {} and getData
+        // still runs (graceful degradation). Only a throwing getData reaches
+        // the onError/catch path — a config failure no longer does. The
+        // failure is logged (not swallowed) but the page still renders.
+        const cfg = cfgRes.ok ? cfgRes.cfg : {}
+        if (tag === 'flaky' || tag === 'guarded') {
+          // getData throws → error path
+          if (tag === 'guarded') {
+            payload = { recovered: true, msg: 'nope' }
           } else {
-            payload = expectedData(tag, matched.params, 'ssr', cfgRes.cfg, op.path.length)
+            payload = { error: 'boom' }
           }
-          if (tag === 'counted') {
-            sim.beforeRenderCalls++
-          }
+        } else if (tag === 'static') {
+          payload = {}
         } else {
-          // config down → catch path
-          if (tag === 'guarded') payload = { recovered: true, msg: cfgRes.err }
-          else payload = { error: cfgRes.err }
+          payload = expectedData(tag, matched.params, 'ssr', cfg, op.path.length)
+        }
+        if (tag === 'counted') {
+          sim.beforeRenderCalls++
         }
         // verify the actual __DATA__ matches the model
         const actual = extractDataJson(html)
@@ -388,10 +387,10 @@ async function simulate(ops: Op[]): Promise<{ steps: Step[]; world: World }> {
       } else {
         const tag = routeTagFor(op.path)!
         const cfgRes = predictConfig(sim)
-        if (!cfgRes.ok) {
-          assert.equal(res.status, 500, 'api: config down → 500')
-          payload = { error: cfgRes.err }
-        } else if (tag === 'flaky' || tag === 'guarded') {
+        // Config failure degrades to {} — /api/data still serves page data
+        // (200), unlike /api/config which surfaces the 500 to TV clients.
+        const cfg = cfgRes.ok ? cfgRes.cfg : {}
+        if (tag === 'flaky' || tag === 'guarded') {
           assert.equal(res.status, 500, 'api: throwing getData → 500')
           payload = { error: tag === 'flaky' ? 'boom' : 'nope' }
         } else if (tag === 'static') {
@@ -400,7 +399,7 @@ async function simulate(ops: Op[]): Promise<{ steps: Step[]; world: World }> {
         } else {
           assert.equal(res.status, 200)
           // /api/data uses mode 'csr'; getEnv uses c.req.path which is '/api/data' + op.path
-          payload = expectedData(tag, matched.params, 'csr', cfgRes.cfg, ('/api/data' + op.path).length)
+          payload = expectedData(tag, matched.params, 'csr', cfg, ('/api/data' + op.path).length)
         }
       }
       assert.deepEqual(json, payload, `api /api/data${op.path} payload mismatch`)

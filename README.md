@@ -8,16 +8,28 @@ Runs as a Hono app. Uses Preact for components and `preact-render-to-string` for
 
 Not published to npm. Install from GitHub:
 
+Pin to a tagged release (recommended for consumers):
+
 ```
-npm install github:project-x15/rendering-engine
+pnpm add github:project-x15/rendering-engine#v0.1.0
 ```
 
-For private repos, this needs git authentication (SSH key or HTTPS token). For local development, clone and link:
+Or float on the default branch (for co-development):
+
+```
+pnpm add github:project-x15/rendering-engine
+```
+
+> **Toolchain requirement:** the package ships raw TypeScript (`main: ./src/index.ts`).
+> Your build tool must import `.ts` directly — Vite, esbuild, Bun, Deno, and tsx all do.
+> Plain Node and plain `tsc` will **not** work without a transpile step.
+
+For private repos, git auth (SSH key or HTTPS token) is required. For local development:
 
 ```
 git clone https://github.com/project-x15/rendering-engine.git
 cd rendering-engine
-npm install
+pnpm install
 ```
 
 ---

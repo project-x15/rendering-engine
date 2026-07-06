@@ -77,7 +77,16 @@ export function createApp(options: AppOptions): HonoApp {
     }
 
     const env = resolveEnv(c)
-    const configPromise = config ? config.load() : Promise.resolve({})
+    // Config is optional data — a failed load must not take down the data
+    // chain, but it also must not be hidden. Degrade to an empty config and
+    // log the failure with context (per Logging Rules). The /api/config
+    // endpoint still surfaces the error to TV clients; here we degrade.
+    const configPromise = config
+      ? config.load().catch((err: Error) => {
+          console.warn('config: load failed, serving data without config', err)
+          return {}
+        })
+      : Promise.resolve({})
 
     return configPromise
       .then((cfg) => {
@@ -103,7 +112,17 @@ export function createApp(options: AppOptions): HonoApp {
       }
 
       const env = resolveEnv(c)
-      const configPromise = config ? config.load() : Promise.resolve({})
+      // Config is optional data — a failed load must not take down the SSR
+      // chain (e.g. cold-start IPv6 DNS race against the config server), but
+      // it also must not be hidden. Degrade to an empty config and log the
+      // failure with context (per Logging Rules) so the missing config is
+      // observable in production instead of silently swallowed.
+      const configPromise = config
+        ? config.load().catch((err: Error) => {
+            console.warn('config: load failed, rendering without config', err)
+            return {}
+          })
+        : Promise.resolve({})
 
       return configPromise
         .then((cfg) => {

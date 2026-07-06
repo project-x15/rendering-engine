@@ -163,3 +163,86 @@ test('SSR: getData error triggers onError fallback', async () => {
   assert.ok(html.includes('Error: fetch failed'))
   assert.ok(html.includes('__DATA__'))
 })
+
+// ── Config load failure: graceful degradation, not silent swallow ──
+//
+// Reproduces the cold-start "first request fails" symptom: config.load() rejects
+// (e.g. IPv6 DNS race against the config server). The SSR/data chain must keep
+// rendering with an empty config instead of hitting onError — but the failure
+// must be observable (logged with context), never silently swallowed.
+
+// Capture console.warn so tests can assert the failure is surfaced to logs.
+function captureWarn(): { messages: any[]; restore: () => void } {
+  const messages: any[] = []
+  const original = console.warn
+  console.warn = (...args: any[]) => { messages.push(args) }
+  return { messages, restore: () => { console.warn = original } }
+}
+
+// A configLoader that always rejects, simulating the cold-start fetch failure.
+function failingConfigLoader(): () => Promise<Record<string, unknown>> {
+  return async () => { throw new Error('fetch failed') }
+}
+
+test('SSR: config load failure degrades gracefully (renders, no error state)', async () => {
+  const app = makeApp({ configLoader: failingConfigLoader() })
+  const html = await fetchHtml(app, '/')
+  // Page still renders with real data — config is optional.
+  assert.ok(html.includes('Test Show'), 'page renders without config')
+  assert.ok(!html.includes('Error: fetch failed'), 'config failure must not trigger onError')
+  // getData saw an empty config (theme ?? 'none' -> 'none').
+  assert.ok(html.includes('none'), 'ctx.config degraded to {}')
+})
+
+test('SSR: config load failure is logged (not silently swallowed)', async () => {
+  const cap = captureWarn()
+  try {
+    const app = makeApp({ configLoader: failingConfigLoader() })
+    await fetchHtml(app, '/')
+    const warned = cap.messages.some((args) =>
+      typeof args[0] === 'string' && /config: load failed/.test(args[0])
+    )
+    assert.ok(warned, 'config load failure must be logged with context')
+  } finally {
+    cap.restore()
+  }
+})
+
+test('/api/data: config load failure degrades gracefully', async () => {
+  const app = makeApp({ configLoader: failingConfigLoader() })
+  const res = await app.fetch(new Request('http://localhost/api/data/'))
+  assert.equal(res.status, 200)
+  const json: any = await res.json()
+  assert.equal(json.title, 'Test Show', 'data endpoint still serves page data')
+  assert.equal(json.theme, 'none', 'ctx.config degraded to {}')
+})
+
+test('/api/config: config load failure still surfaces 500 to TV clients', async () => {
+  // The degradation is SSR/data-only; /api/config must keep surfacing errors
+  // so TV clients know config is unavailable (no silent swallowing here).
+  const app = makeApp({ configLoader: failingConfigLoader() })
+  const res = await app.fetch(new Request('http://localhost/api/config'))
+  assert.equal(res.status, 500)
+  const json: any = await res.json()
+  assert.equal(json.error, 'fetch failed')
+})
+
+test('SSR: config failure retries on next request (failure not cached)', async () => {
+  // Mirrors config.ts: a rejected load clears `pending` so the next request
+  // retries. Once the config server recovers, SSR picks up real config.
+  let calls = 0
+  let broken = true
+  const app = makeApp({
+    configLoader: async () => {
+      calls++
+      if (broken) throw new Error('fetch failed')
+      return { theme: 'dark' }
+    },
+  })
+  const first = await fetchHtml(app, '/')
+  assert.ok(first.includes('none'), 'first request degrades')
+  broken = false
+  const second = await fetchHtml(app, '/')
+  assert.ok(second.includes('dark'), 'second request uses recovered config')
+  assert.equal(calls, 2, 'config loader retried after failure')
+})
