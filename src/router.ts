@@ -12,10 +12,12 @@ export function matchRoute(routes: Route[], pathname: string): MatchedRoute | nu
   }
 
   for (let i = 0; i < routes.length; i++) {
-    const params = matchPath(routes[i].path, path)
-    if (params !== null) {
-      return { route: routes[i], params }
-    }
+    const route = routes[i]
+    const params = matchPath(route.path, path)
+    if (params === null) continue
+    // Run validateParams if present — treat as no-match if validation fails
+    if (route.validateParams && !route.validateParams(params)) continue
+    return { route, params }
   }
   return null
 }

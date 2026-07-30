@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { h } from 'preact'
 import { createApp } from '../src/app.js'
+import { extractData } from './helpers.js'
 import type { Route } from '../src/types.js'
 
 // Targeted tests that close the branch-coverage gaps in src/app.ts.
@@ -10,13 +11,6 @@ import type { Route } from '../src/types.js'
 // the PROVIDED (override) arms so every branch is hit in both directions.
 
 const Tag = () => h('div', { 'data-route': 'min' }, 'MIN')
-
-function extractData(html: string): unknown {
-  const m = html.match(/<script id="__DATA__" type="application\/json">([\s\S]*?)<\/script>/)
-  assert.ok(m, 'expected a __DATA__ script tag')
-  // ssrTemplate escapes </script> -> <\/script>; undo for parsing
-  return JSON.parse(m![1].replace(/<\\\/script>/g, '</script>'))
-}
 
 // ── All options OMITTED → every `??` default arm + no-getEnv/no-config/no-getData ──
 

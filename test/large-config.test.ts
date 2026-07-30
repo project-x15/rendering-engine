@@ -85,11 +85,7 @@ function buildLargeConfig(targetBytes = 3_000_000): Record<string, unknown> {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-function extractDataJson(html: string): unknown {
-  const m = html.match(/<script id="__DATA__" type="application\/json">([\s\S]*?)<\/script>/)
-  if (!m) throw new Error('no __DATA__ in HTML')
-  return JSON.parse(m[1].replace(/<\\\/script>/g, '</script>'))
-}
+import { extractDataJson, mockCacheApi } from './helpers.js'
 
 function measureMs(fn: () => void): number {
   const start = performance.now()
@@ -290,8 +286,8 @@ test('large-config: SSR with config-pass-through getData warns but works', async
   const app = createApp({
     routes,
     configLoader: async () => largeConfig,
+    maxDataSize: 10_000_000, // allow passthrough — default 512KB would catch this
   })
-
   const res = await app.fetch(
     new Request('http://localhost/leak', { headers: { 'user-agent': 'Mozilla/5.0' } }),
   )
@@ -365,23 +361,6 @@ test('large-config: /api/data with params still works', async () => {
 //  5. L2 Cache API with large payload
 // ═══════════════════════════════════════════════════════════════════════
 
-function mockCacheApi(): { cleanup: () => void } {
-  const store = new Map<string, Response>()
-  ;(globalThis as any).caches = {
-    default: {
-      match: (key: string) => {
-        const val = store.get(key)
-        if (!val) return Promise.resolve(undefined)
-        return Promise.resolve(val.clone())
-      },
-      put: (key: string, res: Response) => {
-        store.set(key, res)
-        return Promise.resolve()
-      },
-    },
-  }
-  return { cleanup: () => { delete (globalThis as any).caches; store.clear() } }
-}
 
 test('large-config: L2 Cache API round-trip with 3MB', async () => {
   const mock = mockCacheApi()
@@ -460,7 +439,8 @@ test('large-config: ssrTemplate with large data produces valid HTML', () => {
     })
     // Verify HTML structure
     assert.ok(html.startsWith('<!DOCTYPE html>'), 'must start with doctype')
-    assert.ok(html.includes('<div id="app"><p>hello</p></div>'), 'must contain rendered content')
+    assert.ok(html.includes('data-ssr="true"'), 'must have data-ssr attribute')
+    assert.ok(html.includes('<p>hello</p>'), 'must contain rendered content')
     assert.ok(html.includes('__DATA__'), 'must contain __DATA__')
     // The data doesn't naturally contain </script>, so the replace is a no-op.
     // Verify the escape mechanism works by checking the __DATA__ content directly:
@@ -667,4 +647,243 @@ test('large-config: maxDataSize error path also checked (onError fallback)', asy
   const body = await res.text()
   // Hono's default error handler returns 'Internal Server Error'
   assert.ok(body.length > 0)
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+//  10. maxConfigSize — hard cap on config fetch
+// ═══════════════════════════════════════════════════════════════════════
+
+test('large-config: maxConfigSize exceeded rejects with size error', async () => {
+  const loader = createConfigLoader(async () => largeConfig, {
+    maxConfigSize: 1024, // 1KB — our config is ~3MB, should reject
+  })
+
+  await assert.rejects(
+    () => loader.load(),
+    (err: Error) => {
+      assert.ok(err.message.includes('exceeds'), `message should mention exceeds: ${err.message}`)
+      assert.ok(err.message.includes('maxConfigSize'), `message should mention maxConfigSize: ${err.message}`)
+      assert.ok(err.message.includes('bytes'), `message should include byte count: ${err.message}`)
+      return true
+    },
+  )
+})
+
+test('large-config: maxConfigSize under limit loads normally', async () => {
+  const loader = createConfigLoader(async () => ({ small: 'config' }), {
+    maxConfigSize: 1_000_000, // 1MB — our config is tiny, should pass
+  })
+
+  const cfg = await loader.load()
+  assert.deepEqual(cfg, { small: 'config' })
+})
+
+test('large-config: maxConfigSize not set loads normally (backward compat)', async () => {
+  const loader = createConfigLoader(async () => largeConfig)
+
+  const cfg = await loader.load()
+  assert.equal((cfg as any).catalog.length, 15000)
+})
+
+test('large-config: maxConfigSize error clears pending so retry works', async () => {
+  let calls = 0
+  const loader = createConfigLoader(async () => {
+    calls++
+    if (calls === 1) return largeConfig // too big
+    return { small: 'config' } // small enough
+  }, {
+    maxConfigSize: 1024,
+    circuitBreakerCooldownMs: 0,
+  })
+
+  // First call — rejected (config too big)
+  await assert.rejects(() => loader.load())
+  assert.equal(calls, 1)
+
+  // Second call — should retry (pending was cleared)
+  const cfg = await loader.load()
+  assert.equal(calls, 2)
+  assert.deepEqual(cfg, { small: 'config' })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+//  11. configTimeout — AbortController wrapper
+// ═══════════════════════════════════════════════════════════════════════
+
+test('large-config: configTimeout rejects when fetcher is slow', async () => {
+  const loader = createConfigLoader(
+    async () => {
+      await new Promise((r) => setTimeout(r, 200)) // slow
+      return { theme: 'dark' }
+    },
+    { configTimeout: 50 }, // 50ms timeout
+  )
+
+  await assert.rejects(
+    () => loader.load(),
+    (err: Error) => {
+      assert.ok(err.message.includes('timed out'), `message should mention timed out: ${err.message}`)
+      assert.ok(err.message.includes('50ms'), `message should mention timeout duration: ${err.message}`)
+      return true
+    },
+  )
+})
+
+test('large-config: configTimeout fast fetcher loads normally', async () => {
+  const loader = createConfigLoader(
+    async () => ({ theme: 'dark' }),
+    { configTimeout: 5000 }, // 5s timeout — our fetcher is instant
+  )
+
+  const cfg = await loader.load()
+  assert.deepEqual(cfg, { theme: 'dark' })
+})
+
+test('large-config: configTimeout not set loads normally (backward compat)', async () => {
+  const loader = createConfigLoader(async () => largeConfig)
+
+  const cfg = await loader.load()
+  assert.equal((cfg as any).catalog.length, 15000)
+})
+
+test('large-config: configTimeout clears pending so retry works', async () => {
+  let calls = 0
+  const loader = createConfigLoader(
+    async () => {
+      calls++
+      if (calls === 1) await new Promise((r) => setTimeout(r, 200)) // slow
+      return { theme: 'dark' }
+    },
+    { configTimeout: 50, circuitBreakerCooldownMs: 0 },
+  )
+
+  // First call — timeout
+  await assert.rejects(() => loader.load())
+  assert.equal(calls, 1)
+
+  // Second call — should retry (pending was cleared)
+  const cfg = await loader.load()
+  assert.equal(calls, 2)
+  assert.deepEqual(cfg, { theme: 'dark' })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+//  12. configSelector — selective /api/config response
+// ═══════════════════════════════════════════════════════════════════════
+
+test('large-config: configSelector filters /api/config response', async () => {
+  const app = createApp({
+    routes: [{ path: '/', component: TestPage }],
+    configLoader: async () => largeConfig,
+    configSelector: (cfg) => ({
+      theme: (cfg as any).theme,
+      metadata: (cfg as any).metadata,
+    }),
+  })
+
+  const res = await app.fetch(new Request('http://localhost/api/config'))
+  assert.equal(res.status, 200)
+
+  const json: any = await res.json()
+  // Should only have selected keys
+  assert.ok(json.theme, 'theme should be present')
+  assert.ok(json.metadata, 'metadata should be present')
+  assert.ok(!json.catalog, 'catalog should NOT be in response')
+  assert.ok(!json.features, 'features should NOT be in response')
+  assert.equal(Object.keys(json).length, 2, 'should only have 2 selected keys')
+})
+
+test('large-config: configSelector omitted returns full config (backward compat)', async () => {
+  const app = createApp({
+    routes: [{ path: '/', component: TestPage }],
+    configLoader: async () => largeConfig,
+  })
+
+  const res = await app.fetch(new Request('http://localhost/api/config'))
+  assert.equal(res.status, 200)
+
+  const json: any = await res.json()
+  assert.ok(json.catalog, 'catalog should be present')
+  assert.ok(json.features, 'features should be present')
+  assert.ok(json.theme, 'theme should be present')
+  assert.equal(json.catalog.length, 15000)
+})
+
+test('large-config: configSelector does NOT affect ctx.config in getData', async () => {
+  const app = createApp({
+    routes: [
+      {
+        path: '/',
+        component: TestPage,
+        getData: (ctx: RequestContext) => ({
+          catalogCount: ((ctx.config as any)?.catalog ?? []).length,
+        }),
+      },
+    ],
+    configLoader: async () => largeConfig,
+    configSelector: (cfg) => ({ theme: (cfg as any).theme }), // only theme for TV
+  })
+
+  // SSR — getData should see full config
+  const res = await app.fetch(
+    new Request('http://localhost/', { headers: { 'user-agent': 'Mozilla/5.0' } }),
+  )
+  assert.equal(res.status, 200)
+  const html = await res.text()
+  const dataMatch = html.match(/<script id="__DATA__" type="application\/json">([\s\S]*?)<\/script>/)
+  assert.ok(dataMatch, '__DATA__ must exist')
+  const data = JSON.parse(dataMatch![1])
+  assert.equal(data.catalogCount, 15000, 'getData should see full config with catalog')
+
+  // /api/config — should only have selected keys
+  const apiRes = await app.fetch(new Request('http://localhost/api/config'))
+  const apiJson: any = await apiRes.json()
+  assert.ok(apiJson.theme, 'theme should be present')
+  assert.ok(!apiJson.catalog, 'catalog should NOT be in /api/config')
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+//  13. Cache API 4MB warning
+// ═══════════════════════════════════════════════════════════════════════
+
+test('large-config: Cache API warns when config >3MB', async () => {
+  const mock = mockCacheApi()
+  const warnings: string[] = []
+  const origWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.join(' '))
+  }
+
+  try {
+    const loader = createConfigLoader(async () => largeConfig)
+    await loader.load()
+
+    // Should have a warning about 3MB
+    const cacheWarn = warnings.find((w) => w.includes('3MB'))
+    assert.ok(cacheWarn, `expected 3MB warning, got: ${warnings.join('; ')}`)
+    assert.ok(cacheWarn!.includes('Cache API'), 'warning should mention Cache API')
+  } finally {
+    console.warn = origWarn
+    mock.cleanup()
+  }
+})
+
+test('large-config: Cache API does not warn for small config', async () => {
+  const mock = mockCacheApi()
+  const warnings: string[] = []
+  const origWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.join(' '))
+  }
+
+  try {
+    const loader = createConfigLoader(async () => ({ small: 'config' }))
+    await loader.load()
+
+    const cacheWarn = warnings.find((w) => w.includes('3MB'))
+    assert.ok(!cacheWarn, 'should not warn for small config')
+  } finally {
+    console.warn = origWarn
+    mock.cleanup()
+  }
 })
