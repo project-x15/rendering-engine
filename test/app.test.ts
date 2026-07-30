@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { h } from 'preact'
 import { createApp } from '../src/app.js'
+import type { MiddlewareHandler } from 'hono'
 import type { Route, AppOptions } from '../src/types.js'
 import { captureWarn, captureLogger, type CapturedLog } from './helpers.js'
 
@@ -85,6 +86,27 @@ test('/tv: direct TV access serves CSR shell', async () => {
   const html = await fetchHtml(makeApp(), '/tv')
   assert.ok(html.includes('<div id="app"></div>'))
   assert.ok(html.includes('tv-mode'))
+})
+
+// ── renderMode override ──
+
+test('renderMode: ssr forces SSR even with TV UA', async () => {
+  const html = await fetchHtml(makeApp({ renderMode: 'ssr' }), '/', { 'user-agent': 'Mozilla/5.0 (Tizen 2.4)' })
+  assert.ok(html.includes('__DATA__'), 'SSR: must have __DATA__')
+  assert.ok(!html.includes('<div id="app"></div>'), 'SSR: must not be CSR shell')
+})
+
+test('renderMode: csr forces CSR even with web UA', async () => {
+  const html = await fetchHtml(makeApp({ renderMode: 'csr' }), '/', { 'user-agent': 'Mozilla/5.0 Chrome/120.0' })
+  assert.ok(html.includes('<div id="app"></div>'), 'CSR: must be empty shell')
+  assert.ok(!html.includes('__DATA__'), 'CSR: must not leak __DATA__')
+})
+
+test('renderMode: auto (default) preserves per-request detection', async () => {
+  const web = await fetchHtml(makeApp(), '/', { 'user-agent': 'Mozilla/5.0 Chrome/120.0' })
+  assert.ok(web.includes('__DATA__'), 'auto: web UA → SSR')
+  const tv = await fetchHtml(makeApp(), '/', { 'user-agent': 'Mozilla/5.0 (Tizen 2.4)' })
+  assert.ok(tv.includes('<div id="app"></div>'), 'auto: TV UA → CSR')
 })
 
 // ── /api/data ──
@@ -580,4 +602,151 @@ test('security: custom securityHeaders can override default', async () => {
   })
   const res = await app.fetch(new Request('http://localhost/', { headers: { 'user-agent': 'Mozilla/5.0' } }))
   assert.equal(res.headers.get('x-content-type-options'), null, 'empty string removes the default')
+})
+
+// ── /api/data: config-leak guard ─────────────────────────────────────────
+//
+// The SSR page handler has a guard: if getData returns the full config object
+// reference (getData: (ctx) => ctx.config), it throws to prevent megabytes
+// being inlined into the HTML. The /api/data handler has the same guard for
+// the TV JSON endpoint. The SSR guard is tested above; the data guard is
+// tested here.
+
+test('/api/data: getData returning full config object returns 500', async () => {
+  const app = makeApp({
+    routes: [{
+      path: '/leak',
+      component: TestPage,
+      getData: (ctx) => ctx.config as Record<string, unknown>,
+    }],
+    configLoader: async () => ({ theme: 'dark' }),
+  })
+  const res = await app.fetch(new Request('http://localhost/api/data/leak'))
+  assert.equal(res.status, 500)
+  const json: any = await res.json()
+  assert.ok(/returned the full config object/.test(json.error),
+    'error must explain the config leak mistake')
+})
+
+// ── serveStatic: asset route registration ──────────────────────────────
+//
+// On Workers, serveStatic is omitted (wrangler handles assets). On Node,
+// Bun, and Deno, the consumer passes a serveStatic factory. The engine
+// registers /tv/assets/* and /web/assets/* when it's provided. Both paths
+// must be registered — not just one.
+
+test('serveStatic: both /tv/assets/* and /web/assets/* registered when provided', async () => {
+  const mockServeStatic = (): MiddlewareHandler => async (c) => c.body('asset:' + c.req.path)
+  const app = makeApp({ serveStatic: mockServeStatic as any })
+
+  const tvRes = await app.fetch(new Request('http://localhost/tv/assets/style.css'))
+  assert.equal(tvRes.status, 200)
+  assert.ok((await tvRes.text()).includes('asset:'), 'TV asset route must be served')
+
+  const webRes = await app.fetch(new Request('http://localhost/web/assets/style.css'))
+  assert.equal(webRes.status, 200)
+  assert.ok((await webRes.text()).includes('asset:'), 'Web asset route must be served')
+})
+
+// ── SSR: config-leak guard (SSR path) ───────────────────────────────────
+//
+// The /api/data handler's config-leak guard is tested above. The SSR page
+// handler has the same guard — if getData returns the full config object
+// reference, it throws. The SSR error handler catches it and renders with
+// onError (or default error data). This tests the SSR-specific guard path.
+
+test('SSR: getData returning full config object triggers error fallback', async () => {
+  const app = makeApp({
+    routes: [{
+      path: '/leak',
+      component: TestPage,
+      getData: (ctx) => ctx.config as Record<string, unknown>,
+      onError: (err) => ({ title: 'Leaked: ' + err.message }),
+    }],
+    configLoader: async () => ({ theme: 'dark' }),
+  })
+  const html = await fetchHtml(app, '/leak')
+  assert.ok(html.includes('Leaked:'), 'SSR config-leak guard should trigger onError')
+  assert.ok(html.includes('__DATA__'))
+})
+
+// ── /api/data: error logging with root path ────────────────────────────
+//
+// The data handler catch block computes pathname from c.req.path. When the
+// path is exactly /api/data (root), the slice returns '' and || '/' fires.
+// The error log must show path: '/' not path: ''.
+
+test('/api/data: error on root path logs pathname as /', async () => {
+  const { logger, logs } = captureLogger()
+  const app = createApp({
+    routes: [{ path: '/', component: TestPage, getData: () => { throw new Error('boom') } }],
+    configLoader: async () => ({}),
+    logger,
+  })
+  await app.fetch(new Request('http://localhost/api/data'))
+  const entry = logs.find((l) => l.level === 'error' && /api\/data.*failed/.test(l.message))
+  assert.ok(entry, 'data handler error must be logged')
+  assert.equal(entry!.fields!.path, '/', 'root path must resolve to / in error log')
+})
+
+// ── cacheControl on error paths ──────────────────────────────────────
+//
+// cacheControl is set on both the normal SSR response and the error
+// fallback response. The final render fallback (renderToString fails in
+// the error path) must also include it.
+
+test('SSR: error fallback response includes Cache-Control when set', async () => {
+  const app = makeApp({
+    cacheControl: 'public, max-age=60',
+    routes: [{
+      path: '/fail',
+      component: TestPage,
+      getData: () => { throw new Error('boom') },
+      onError: (err) => ({ title: 'Error: ' + err.message }),
+    }],
+  })
+  const res = await app.fetch(new Request('http://localhost/fail', { headers: { 'user-agent': 'Mozilla/5.0' } }))
+  assert.equal(res.headers.get('cache-control'), 'public, max-age=60',
+    'error fallback must include Cache-Control when set')
+})
+
+// ── Final render fallback ──────────────────────────────────────────────
+//
+// When renderToString throws even in the error path (component is broken
+// regardless of data), the engine must produce a minimal HTML 500 page,
+// not an unhandled exception. This is the last line of defense.
+
+test('SSR: final fallback when renderToString fails in error path', async () => {
+  const AlwaysThrow = () => { throw new Error('component broken') }
+  const app = makeApp({
+    routes: [{ path: '/broken', component: AlwaysThrow as any }],
+  })
+  const res = await app.fetch(new Request('http://localhost/broken', { headers: { 'user-agent': 'Mozilla/5.0' } }))
+  assert.equal(res.status, 500)
+  const html = await res.text()
+  assert.ok(html.includes('Render error'), 'must produce minimal fallback HTML')
+})
+
+test('SSR: final fallback response includes Cache-Control when set', async () => {
+  const AlwaysThrow = () => { throw new Error('broken') }
+  const app = makeApp({
+    cacheControl: 'no-cache',
+    routes: [{ path: '/broken', component: AlwaysThrow as any }],
+  })
+  const res = await app.fetch(new Request('http://localhost/broken', { headers: { 'user-agent': 'Mozilla/5.0' } }))
+  assert.equal(res.status, 500)
+  assert.equal(res.headers.get('cache-control'), 'no-cache')
+})
+
+test('SSR: final fallback handles non-Error throw from component', async () => {
+  // Component throws a string, not an Error — the final fallback must
+  // coerce it via String(renderErr), not crash on .message access.
+  const ThrowString = () => { throw 'string error' }
+  const app = makeApp({
+    routes: [{ path: '/throw-string', component: ThrowString as any }],
+  })
+  const res = await app.fetch(new Request('http://localhost/throw-string', { headers: { 'user-agent': 'Mozilla/5.0' } }))
+  assert.equal(res.status, 500)
+  const html = await res.text()
+  assert.ok(html.includes('Render error'), 'must produce fallback HTML for non-Error throws')
 })

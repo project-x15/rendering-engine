@@ -23,6 +23,14 @@ export interface Logger {
 
 export type Mode = 'ssr' | 'csr'
 
+/**
+ * Render mode override.
+ *   'auto' — detect per-request (TV → CSR, Web → SSR)
+ *   'ssr'  — always server-render, even for TV clients
+ *   'csr'  — always serve CSR shell, for all clients
+ */
+export type RenderMode = 'auto' | 'ssr' | 'csr'
+
 // ─── Routes ───────────────────────────────────────────────────
 
 export interface Route<TState = Record<string, unknown>> {
@@ -124,6 +132,8 @@ export interface AppOptions {
   headContent?: string
   tvPath?: string
   detectMode?: (req: Request) => Mode
+  /** Render mode override. Default: 'auto' (per-request detection). */
+  renderMode?: RenderMode
   /** Resolve app-specific env from the request (API keys, headers, etc.) */
   getEnv?: (c: Context) => Record<string, unknown>
   /**

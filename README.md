@@ -195,6 +195,7 @@ Returns a Hono app. The app handles four kinds of requests.
 | `tvJsPath` | `'/tv/assets/app.js'` | TV JS path |
 | `tvPath` | `'/tv'` | Direct TV shell URL |
 | `detectMode` | built-in detector | Override mode detection |
+| `renderMode` | `'auto'` | Force render mode: `'auto'` (per-request), `'ssr'` (always SSR), `'csr'` (always CSR shell) |
 | `getEnv` | `() => ({})` | Resolve per-request env |
 | `configLoader` | none | Async config fetcher; receives an optional `AbortSignal` for timeout cancellation |
 | `configTtl` | undefined | App-level config freshness TTL in ms. When stale, serves cached + background refresh |

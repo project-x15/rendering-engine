@@ -26,6 +26,7 @@ export function createApp(options: AppOptions): HonoApp {
   const { routes } = options
   const assetsRoot = options.assetsRoot ?? './dist'
   const modeDetector = options.detectMode ?? detectMode
+  const renderMode = options.renderMode ?? 'auto'
   const title = options.title ?? ''
   const tvPath = options.tvPath ?? '/tv'
   const headContent = options.headContent ?? ''
@@ -206,9 +207,10 @@ export function createApp(options: AppOptions): HonoApp {
       app.get('/api/data', createDataHandler(route))
     }
 
-    // Page route (existing — mode detection + SSR)
+    // Page route — mode detection + SSR
     app.get(route.path, async (c) => {
-      if (modeDetector(c.req.raw) === 'csr') {
+      const mode = renderMode === 'auto' ? modeDetector(c.req.raw) : renderMode
+      if (mode === 'csr') {
         return c.html(csrShell({ cssPath: tvCss, jsPath: tvJs, title, headContent }))
       }
 

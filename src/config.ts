@@ -84,9 +84,9 @@ interface WorkerCacheStorage extends CacheStorage {
   default: Cache
 }
 
-// Cache API detection — available on Workers, not on standard Node.js
+// caches exists in ServiceWorker envs; caches.default is Workers-only
 function hasCacheApi(): boolean {
-  return typeof caches !== 'undefined'
+  return typeof caches !== 'undefined' && 'default' in caches
 }
 
 export function createConfigLoader<T>(

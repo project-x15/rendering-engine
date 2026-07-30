@@ -5,7 +5,7 @@ import { createApp } from '../src/app.js'
 import { createConfigLoader } from '../src/config.js'
 import { matchRoute } from '../src/router.js'
 import { detectMode } from '../src/mode.js'
-import type { Route, Mode, RequestContext } from '../src/types.js'
+import type { Route, Mode, RequestContext, RenderMode } from '../src/types.js'
 import type { Context } from 'hono'
 import { mockCacheApi, extractDataJson } from './helpers.js'
 
@@ -247,7 +247,7 @@ function getEnv(c: Context): Record<string, unknown> {
 }
 
 // Build a fresh app + world for a run
-function buildRun() {
+function buildRun(renderMode?: RenderMode) {
   const world: World = { fetchCount: 0, failNext: false, loaded: false, beforeRenderCalls: 0 }
   const fetcher = makeFetcher(world)
   // wire beforeRender for the /counted route into the world counter
@@ -265,8 +265,15 @@ function buildRun() {
     configLoader: fetcher,
     getEnv,
     circuitBreakerCooldownMs: 0,
+    renderMode,
   })
   return { app, world }
+}
+
+// Resolve the effective mode for a page request, considering renderMode override.
+function resolveMode(req: Request, renderMode?: RenderMode): Mode {
+  if (renderMode && renderMode !== 'auto') return renderMode
+  return detectMode(req)
 }
 
 function buildRequest(op: Op): Request {
@@ -292,8 +299,8 @@ interface Step {
 }
 
 // Run a precomputed op list through a fresh app, returning the trace + world
-async function simulate(ops: Op[]): Promise<{ steps: Step[]; world: World }> {
-  let { app, world } = buildRun()
+async function simulate(ops: Op[], renderMode?: RenderMode): Promise<{ steps: Step[]; world: World }> {
+  let { app, world } = buildRun(renderMode)
   const sim = freshSim()
   const steps: Step[] = []
 
@@ -306,7 +313,7 @@ async function simulate(ops: Op[]): Promise<{ steps: Step[]; world: World }> {
       // match via applyReset. L2 (Cache API) is not available in the Node.js
       // test env, so the rebuilt loader has nothing to fall back on; the next
       // config-touching op must refetch — exactly what the model predicts.
-      const rebuilt = buildRun()
+      const rebuilt = buildRun(renderMode)
       app = rebuilt.app
       world = rebuilt.world
       applyReset(sim)
@@ -324,7 +331,7 @@ async function simulate(ops: Op[]): Promise<{ steps: Step[]; world: World }> {
     const res = await app.fetch(req)
 
     if (op.t === 'page') {
-      const mode = detectMode(req)
+      const mode = resolveMode(req, renderMode)
       const html = await res.text()
       let payload: unknown = null
       if (mode === 'csr') {
@@ -434,6 +441,22 @@ test('DST: reproducibility — same seed yields byte-identical traces', async ()
   assert.equal(run1.world.beforeRenderCalls, run2.world.beforeRenderCalls)
 })
 
+test('DST: reproducibility with renderMode=ssr', async () => {
+  const seed = 0xbeef
+  const ops = genOps(mulberry32(seed), 200)
+  const run1 = await simulate(ops, 'ssr')
+  const run2 = await simulate(ops, 'ssr')
+  assert.deepEqual(run1.steps, run2.steps, 'ssr: two runs of the same seed must produce identical traces')
+})
+
+test('DST: reproducibility with renderMode=csr', async () => {
+  const seed = 0xdead
+  const ops = genOps(mulberry32(seed), 200)
+  const run1 = await simulate(ops, 'csr')
+  const run2 = await simulate(ops, 'csr')
+  assert.deepEqual(run1.steps, run2.steps, 'csr: two runs of the same seed must produce identical traces')
+})
+
 test('DST: model sync — real fetchCount matches reference prediction across seeds', async () => {
   // The reference model predicts exactly when the fetcher is invoked. The real
   // world's fetchCount must equal the model's at every point — verified by the
@@ -465,6 +488,50 @@ test('DST: model sync — real fetchCount matches reference prediction across se
   }
 })
 
+test('DST: model sync with renderMode=ssr — all pages touch config', async () => {
+  const seeds = [5, 13, 99, 500]
+  for (const seed of seeds) {
+    const ops = genOps(mulberry32(seed), 100)
+    const { world } = await simulate(ops, 'ssr')
+    const sim = freshSim()
+    for (const op of ops) {
+      if (op.t === 'reset') applyReset(sim)
+      else if (op.t === 'failNext') sim.failNext = true
+      else if (op.t === 'page') {
+        // ssr mode: all pages touch config
+        const m = matchRoute(ROUTES, op.path)
+        if (m) predictConfig(sim)
+      } else if (op.t === 'api') {
+        if (matchRoute(ROUTES, op.path)) predictConfig(sim)
+      } else if (op.t === 'config') {
+        predictConfig(sim)
+      }
+    }
+    assert.equal(world.fetchCount, sim.fetchCount, `seed ${seed} ssr: fetchCount drift`)
+  }
+})
+
+test('DST: model sync with renderMode=csr — no pages touch config', async () => {
+  const seeds = [8, 21, 77, 333]
+  for (const seed of seeds) {
+    const ops = genOps(mulberry32(seed), 100)
+    const { world } = await simulate(ops, 'csr')
+    const sim = freshSim()
+    for (const op of ops) {
+      if (op.t === 'reset') applyReset(sim)
+      else if (op.t === 'failNext') sim.failNext = true
+      else if (op.t === 'page') {
+        // csr mode: pages are CSR shell, no config touched
+      } else if (op.t === 'api') {
+        if (matchRoute(ROUTES, op.path)) predictConfig(sim)
+      } else if (op.t === 'config') {
+        predictConfig(sim)
+      }
+    }
+    assert.equal(world.fetchCount, sim.fetchCount, `seed ${seed} csr: fetchCount drift`)
+  }
+})
+
 test('DST: invariant sweep — every step valid across 32 seeds × 200 ops', async () => {
   // Each simulate() call already asserts per-step invariants. Running many
   // seeds here exercises the full mode × route × error × reset space.
@@ -476,6 +543,22 @@ test('DST: invariant sweep — every step valid across 32 seeds × 200 ops', asy
     totalOps += ops.length
   }
   assert.ok(totalOps >= 32 * 200 * 0.9, `exercised ${totalOps} ops`)
+})
+
+test('DST: invariant sweep with renderMode=ssr', async () => {
+  const seeds = Array.from({ length: 8 }, (_, i) => (i + 1) * 2027)
+  for (const seed of seeds) {
+    const ops = genOps(mulberry32(seed), 100)
+    await simulate(ops, 'ssr')
+  }
+})
+
+test('DST: invariant sweep with renderMode=csr', async () => {
+  const seeds = Array.from({ length: 8 }, (_, i) => (i + 1) * 3049)
+  for (const seed of seeds) {
+    const ops = genOps(mulberry32(seed), 100)
+    await simulate(ops, 'csr')
+  }
 })
 
 test('DST: config dedup — concurrent config-touching requests share one fetch', async () => {
@@ -555,9 +638,22 @@ test('DST: mode detection is a pure function of the request (no hidden state)', 
   // detectMode must be stateless: the same request always yields the same mode
   // regardless of what ran before it. Verified across the full signal matrix.
   const matrix: Signals[] = []
+  // Cookie edge cases included: malformed percent-encoding (tv-mode=%zz —
+  // decodeURIComponent throws, getCookie returns raw value, falls through to
+  // UA), and segments without '=' (flag; tv-mode=1 — getCookie skips 'flag',
+  // matches 'tv-mode=1'). These exercise the catch and continue branches in
+  // mode.ts getCookie without changing the reference model — detectMode is
+  // still a pure function of the request, the test just checks the response
+  // matches whatever mode it returns.
+  const cookies = [
+    'tv-mode=1', 'tv-mode=0', '',
+    'tv-mode=%zz',               // malformed %-encoding → catch branch
+    'flag; tv-mode=1',           // segment without '=' → continue branch, then CSR
+    'flag; tv-mode=0',           // segment without '=' → continue branch, then SSR
+  ]
   for (const ua of [...TV_UAS, ...WEB_UAS]) {
     for (const query of ['?tv=1', '?web=1', '']) {
-      for (const cookie of ['tv-mode=1', 'tv-mode=0', '']) {
+      for (const cookie of cookies) {
         matrix.push({ ua, query, cookie })
       }
     }

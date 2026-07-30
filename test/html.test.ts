@@ -131,3 +131,22 @@ test('ssrTemplate: maxDataSize hard cap throws regardless of dev', () => {
     cap.restore()
   }
 })
+
+test('ssrTemplate: dev:true with large data and no routePath uses "?" fallback', () => {
+  // Covers the opts.routePath ?? '?' branch inside the dev warning path.
+  const cap = captureConsoleWarn()
+  try {
+    ssrTemplate({ html: '', data: big, cssPath: '/a.css', jsPath: '/b.js', dev: true })
+    const warned = cap.messages.some((m) => /SSR __DATA__ is.*\?/.test(m))
+    assert.ok(warned, 'warning should use "?" when routePath is omitted')
+  } finally {
+    cap.restore()
+  }
+})
+
+test('ssrTemplate: maxDataSize set with data under limit does not throw', () => {
+  // Covers the false branch of the maxDataSize check: limit is set but
+  // data is small enough — must return HTML, not throw.
+  const html = ssrTemplate({ html: '<p>ok</p>', data: { x: 1 }, cssPath: '/a.css', jsPath: '/b.js', maxDataSize: 10000, routePath: '/small' })
+  assert.ok(html.includes('<p>ok</p>'))
+})

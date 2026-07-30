@@ -65,3 +65,29 @@ test('matchRoute: valid percent-encoding decodes params', () => {
   assert.ok(m)
   assert.equal(m!.params.id, 'hello world')
 })
+
+// ── validateParams ──────────────────────────────────────────────────────
+
+test('matchRoute: validateParams returning true matches the route', () => {
+  const r: Route[] = [
+    { path: '/item/:id', component: () => null, validateParams: (p) => /^\d+$/.test(p.id) },
+  ]
+  const m = matchRoute(r, '/item/42')
+  assert.ok(m)
+  assert.equal(m!.route.path, '/item/:id')
+  assert.equal(m!.params.id, '42')
+})
+
+test('matchRoute: validateParams returning false falls through to next route', () => {
+  const r: Route[] = [
+    { path: '/item/:id', component: () => null, validateParams: (p) => /^\d+$/.test(p.id) },
+    { path: '/item/:id', component: () => null },
+  ]
+  // Non-numeric id: first route's validateParams fails, falls through to
+  // the second route with the same pattern (no validateParams).
+  const m = matchRoute(r, '/item/abc')
+  assert.ok(m)
+  assert.equal(m!.route, r[1],
+    'should fall through to next route when validateParams fails')
+  assert.equal(m!.params.id, 'abc')
+})

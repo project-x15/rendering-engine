@@ -5,3 +5,4 @@ dist/
 coverage/
 reports/
 test-results/
+.pi

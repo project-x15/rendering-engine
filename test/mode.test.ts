@@ -67,3 +67,16 @@ test('detectMode: tv-mode=0 among other cookies forces SSR', () => {
 test('detectMode: cookie with similar prefix (xtv-mode=1) must NOT trigger CSR', () => {
   assert.equal(detectMode(req('/', { cookie: 'xtv-mode=1' })), 'ssr')
 })
+
+test('detectMode: malformed percent-encoding in cookie value does not crash (catch branch)', () => {
+  // tv-mode=%zz — decodeURIComponent throws on the value.
+  // getCookie catches the error and returns the raw value.
+  // Raw '%zz' is not '1', so detection falls through to SSR (default).
+  assert.equal(detectMode(req('/', { cookie: 'tv-mode=%zz' })), 'ssr')
+})
+
+test('detectMode: cookie segment without equals sign is skipped', () => {
+  // 'flag' has no '=' — getCookie must skip it, not crash.
+  // 'tv-mode=1' after it still matches → CSR.
+  assert.equal(detectMode(req('/', { cookie: 'flag; tv-mode=1' })), 'csr')
+})

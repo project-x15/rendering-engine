@@ -11,6 +11,7 @@ export { ssrTemplate, csrShell } from './html.js'
 export type {
   Logger,
   Mode,
+  RenderMode,
   Route,
   RequestContext,
   AppOptions,
