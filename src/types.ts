@@ -1,12 +1,22 @@
 import type { ComponentType } from 'preact'
-import type { Context, MiddlewareHandler } from 'hono'
+import type { Context, Hono, MiddlewareHandler } from 'hono'
 
 // ─── Logger ──────────────────────────────────────────────────
 
+/**
+ * Structured logger interface. The message is a short human-readable label
+ * (stable, grep-able). Structured fields (requestId, route, durationMs, error,
+ * etc.) are passed as a separate object so log pipelines can index them without
+ * parsing free-text strings.
+ *
+ * The default logger is `console`, which passes fields as the second argument
+ * to `console.info` / `console.warn` / `console.error`. For production, provide
+ * a custom logger that serializes to JSON or your log pipeline's format.
+ */
 export interface Logger {
-  info: (message: string, ...args: unknown[]) => void
-  warn: (message: string, ...args: unknown[]) => void
-  error: (message: string, ...args: unknown[]) => void
+  info: (message: string, fields?: Record<string, unknown>) => void
+  warn: (message: string, fields?: Record<string, unknown>) => void
+  error: (message: string, fields?: Record<string, unknown>) => void
 }
 
 // ─── Render mode ──────────────────────────────────────────────
@@ -17,7 +27,14 @@ export type Mode = 'ssr' | 'csr'
 
 export interface Route<TState = Record<string, unknown>> {
   path: string
-  component: ComponentType<Record<string, unknown>>
+  /**
+   * Preact component that renders the page. Receives the data from getData
+   * as props: `{ data: Partial<TState> }`. This is the only data-passing
+   * mechanism during SSR — the component receives data directly, not via
+   * side effects or module-level state. This is safe under concurrent
+   * requests because each request's data is in its own props closure.
+   */
+  component: ComponentType<{ data: Partial<TState> }>
   /**
    * Fetch page-specific data for this route.
    *
@@ -35,7 +52,29 @@ export interface Route<TState = Record<string, unknown>> {
    * See `config` on RequestContext for details.
    */
   getData?: (ctx: RequestContext) => Promise<Partial<TState>> | Partial<TState>
-  beforeRender?: (data: Partial<TState>) => void
+  /**
+   * Side-effect hook fired before the component renders (analytics, tracking).
+   *
+   * Fire-and-forget: the engine does NOT await the return value. A sync throw or
+   * a rejected promise is logged and isolated — it never breaks the render or
+   * surfaces as an unhandled rejection. Because it is not awaited, a slow hook
+   * does not delay the SSR response. On serverless runtimes the isolate may be
+   * torn down once the response is flushed, so do not rely on async work
+   * completing after the response — prefer sync hooks or kick work off
+   * before returning.
+   *
+   * The `data` object is FROZEN (Object.freeze) before being passed to this
+   * hook. Any attempt to mutate it will throw in strict mode (ESM default).
+   * If you need to transform data, return a new object — do not mutate the
+   * received reference, as it is the same object that will be serialized into
+   * SSR __DATA__.
+   *
+   * This hook is for SIDE EFFECTS only. Data is passed to the component as
+   * props (`{ data }`). Do not use beforeRender to set mutable state that the
+   * component reads during render — that creates a race condition under
+   * concurrent SSR requests on the same isolate.
+   */
+  beforeRender?: (data: Partial<TState>) => void | Promise<void>
   onError?: (err: Error) => Partial<TState>
   /**
    * Optional validator for extracted route params.
@@ -75,7 +114,13 @@ export interface AppOptions {
   tvJsPath?: string
   /** HTML <title>. Default: app must provide. */
   title?: string
-  /** Extra <head> content (fonts, meta tags, analytics). Default: empty. */
+  /**
+   * Extra <head> content (fonts, meta tags, analytics). Default: empty.
+   *
+   * SECURITY: interpolated into the HTML <head> RAW (not escaped) — it must be
+   * build-time, app-controlled content. Never interpolate user- or
+   * request-derived values here, or it becomes an XSS vector.
+   */
   headContent?: string
   tvPath?: string
   detectMode?: (req: Request) => Mode
@@ -116,11 +161,29 @@ export interface AppOptions {
    */
   circuitBreakerCooldownMs?: number
   /**
+   * App-level freshness TTL for config cache, in milliseconds.
+   *
+   * When set, cached config is served instantly while fresh (within TTL).
+   * When stale (past TTL), the stale value is served immediately and a
+   * non-blocking background refresh fetches a new value from origin. The
+   * next request after the refresh completes gets the fresh value.
+   *
+   * Default: undefined (no TTL, config cached until isolate restart or
+   * manual reset()).
+   */
+  configTtl?: number
+  /**
    * Max allowed size (bytes) for SSR __DATA__ on any single route.
    * When exceeded, the engine logs a warning (dev) or throws (production).
    * Default: 524288 (512KB). Set to Infinity to disable.
    */
   maxDataSize?: number
+
+  /**
+   * Development mode. When true, the engine warns on large `__DATA__` payloads
+   * (over 100KB). Environment-agnostic — no process.env check. Default: false.
+   */
+  dev?: boolean
 
   /**
    * Logger for engine-internal diagnostics.
@@ -135,6 +198,15 @@ export interface AppOptions {
 
   /** Static asset middleware. Omit on Workers (wrangler handles assets). */
   serveStatic?: (opts: { root: string }) => MiddlewareHandler
+  /**
+   * Security headers set on all responses.
+   *
+   * Default: { 'X-Content-Type-Options': 'nosniff' }.
+   * Set to false to disable all security headers.
+   * Provide a record to merge with defaults — use an empty string value
+   * to remove a specific default header.
+   */
+  securityHeaders?: false | Record<string, string>
 }
 
 // ─── HTML template options ────────────────────────────────────
@@ -149,12 +221,24 @@ export interface SsrTemplateOpts {
   /** Route path for warning messages (e.g. '/show/:id') */
   routePath?: string
   /**
+   * URL the client can fetch to re-hydrate data if SSR HTML is discarded.
+   * Example: '/api/data/show/42'
+   * Set by the engine automatically.
+   */
+  ssrDataUrl?: string
+  /**
    * Max allowed __DATA__ size in bytes.
-   * - In development: logs warning when exceeded
-   * - In production: throws when exceeded
+   * - When exceeded: logs a warning if `dev` is true, throws if `maxDataSize`
+   *   is also exceeded.
    * Omit for unlimited.
    */
   maxDataSize?: number
+  /**
+   * Development mode. When true, the engine warns on large `__DATA__` payloads
+   * (over 100KB). This replaces a `process.env.NODE_ENV` check so the engine
+   * stays environment-agnostic. Default: false (no warning).
+   */
+  dev?: boolean
 }
 
 export interface CsrShellOpts {
@@ -163,6 +247,11 @@ export interface CsrShellOpts {
   title?: string
   headContent?: string
 }
+
+// ─── Hono app types ──────────────────────────────────────────
+
+export type AppEnv = { Variables: { requestId: string } }
+export type HonoApp = Hono<AppEnv>
 
 // ─── Route matching ───────────────────────────────────────────
 

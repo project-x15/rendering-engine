@@ -13,6 +13,32 @@ const TV_UA_KEYWORDS = [
 ] as const
 
 /**
+ * Parse a single cookie value from the Cookie header by exact name match.
+ * Splits on '; ' (the standard cookie separator) and matches the key
+ * exactly, so 'not-tv-mode' does not match 'tv-mode'.
+ * Returns the decoded value or null if the cookie is absent.
+ */
+function getCookie(req: Request, name: string): string | null {
+  const header = req.headers.get('cookie')
+  if (!header) return null
+  const parts = header.split(';')
+  for (let i = 0; i < parts.length; i++) {
+    const eq = parts[i].indexOf('=')
+    if (eq === -1) continue
+    const key = parts[i].slice(0, eq).trim()
+    if (key === name) {
+      const val = parts[i].slice(eq + 1).trim()
+      try {
+        return decodeURIComponent(val)
+      } catch {
+        return val
+      }
+    }
+  }
+  return null
+}
+
+/**
  * Multi-signal detection (priority order):
  * 1. Query param (?tv=1 / ?web=1)
  * 2. Cookie (tv-mode=1 / tv-mode=0)
@@ -28,10 +54,11 @@ export function detectMode(req: Request): Mode {
   if (url.searchParams.get('tv') === '1') return 'csr'
   if (url.searchParams.get('web') === '1') return 'ssr'
 
-  // 2. Cookie override
-  const cookie = req.headers.get('cookie') ?? ''
-  if (/tv-mode=1/.test(cookie)) return 'csr'
-  if (/tv-mode=0/.test(cookie)) return 'ssr'
+  // 2. Cookie override — parse cookie header properly to avoid
+  // matching substrings (e.g. 'not-tv-mode=1' must not match 'tv-mode=1').
+  const cookieValue = getCookie(req, 'tv-mode')
+  if (cookieValue === '1') return 'csr'
+  if (cookieValue === '0') return 'ssr'
 
   // 3. Client hints
   const secChUa = req.headers.get('sec-ch-ua-platform') ?? ''

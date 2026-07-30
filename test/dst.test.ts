@@ -7,6 +7,7 @@ import { matchRoute } from '../src/router.js'
 import { detectMode } from '../src/mode.js'
 import type { Route, Mode, RequestContext } from '../src/types.js'
 import type { Context } from 'hono'
+import { mockCacheApi, extractDataJson } from './helpers.js'
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Deterministic Simulation Testing (DST)
@@ -217,12 +218,6 @@ function routeTagFor(path: string): string | null {
   if (r.path === '/guarded') return 'guarded'
   if (r.path === '/counted') return 'counted'
   return null
-}
-
-function extractDataJson(html: string): unknown {
-  const m = html.match(/<script id="__DATA__" type="application\/json">([\s\S]*?)<\/script>/)
-  if (!m) throw new Error('no __DATA__ in HTML')
-  return JSON.parse(m[1].replace(/<\\\/script>/g, '</script>'))
 }
 
 // ── The world (mutable, deterministic) ──────────────────────────────────
@@ -585,17 +580,6 @@ test('DST: mode detection is a pure function of the request (no hidden state)', 
 })
 
 // ── L2 (Cache API) determinism ──────────────────────────────────────────
-
-function mockCacheApi(): { cleanup: () => void } {
-  const store = new Map<string, Response>()
-  ;(globalThis as any).caches = {
-    default: {
-      match: (key: string) => Promise.resolve(store.get(key)?.clone()),
-      put: (key: string, res: Response) => { store.set(key, res); return Promise.resolve() },
-    },
-  }
-  return { cleanup: () => { delete (globalThis as any).caches; store.clear() } }
-}
 
 test('DST: L2 cache survives isolate restart deterministically', async () => {
   const mock = mockCacheApi()

@@ -11,48 +11,53 @@ GitHub: https://github.com/project-x15/rendering-engine
 src/
   index.ts    barrel exports
   app.ts      createApp() - Hono app factory, wires all routes
-  config.ts   createConfigLoader() - L1 in-memory + L2 Cache API, dedup
-  mode.ts     detectMode() - 4-signal TV/web detection
+  config.ts   createConfigLoader() - L1 in-memory + L2 Cache API, dedup, stale-while-revalidate
+  mode.ts     detectMode() - 4-signal TV/web detection, proper cookie parsing
   router.ts   matchRoute() - path matching with :params, no wildcards
   html.ts     ssrTemplate() + csrShell() - HTML templates, XSS escaping
   types.ts    Mode, Route, RequestContext, AppOptions, etc.
 
 test/
-  app.test.ts          integration: SSR, CSR, /api/data, config, errors
-  config.test.ts       config loader cache + dedup
-  mode.test.ts         mode detection signals
+  app.test.ts          integration: SSR, CSR, /api/data, config, errors, concurrent props
+  config.test.ts       config loader cache + dedup + configTtl + circuit breaker
+  mode.test.ts         mode detection signals, cookie word-boundary
   router.test.ts       path matching, params, edge cases
   html.test.ts         template output, XSS escaping
   defaults.test.ts     fallback branch coverage
   dst.test.ts          deterministic simulation testing (seeded PRNG)
   large-config.test.ts 3MB config stress tests
 
-530 lines of source. 1930 lines of tests. 99 tests, all passing.
-
 ## Public API
 
 createApp(options) -> Hono app
   options.routes       Route[] (required)
   options.title        string
-  options.headContent  string (extra <head> HTML)
+  options.headContent  string (extra <head> HTML; RAW/unescaped — app-controlled only)
   options.configLoader async () => config object
   options.detectMode   (req) => 'ssr' | 'csr'
   options.getEnv       (c) => env object
   options.serveStatic  (opts) => MiddlewareHandler (Node/Bun/Deno, omit on Workers)
   options.maxDataSize  number (hard cap on __DATA__ bytes)
+  options.configTtl    number (app-level config freshness TTL in ms; stale-while-revalidate)
+  options.dev          boolean (warn on __DATA__ >100KB; default false)
   options.assetsRoot   string (default './dist')
   options.webCssPath   string (default '/web/assets/style.css')
   options.webJsPath    string (default '/web/assets/client.js')
   options.tvCssPath    string (default '/tv/assets/style.css')
   options.tvJsPath     string (default '/tv/assets/app.js')
   options.tvPath       string (default '/tv')
+  options.logger       Logger (default console). Structured: info/warn/error(message, fields?)
+                     Fields: requestId, route, path, durationMs, error, phase
+  options.securityHeaders false | Record (default { 'X-Content-Type-Options': 'nosniff' })
+                     Set false to disable. Record merges with defaults.
 
 Route:
   path        string (e.g. '/show/:id')
-  component   Preact component
-  getData?    (ctx) => page data (serialized into __DATA__)
-  beforeRender? (data) => void (side effects before render)
-  onError?    (err) => fallback data
+  component   Preact component receiving { data: Partial<TState> } as props
+  getData?    (ctx) => page data (serialized into __DATA__, passed to component as props)
+  beforeRender? (data) => void | Promise<void> (side effects ONLY; fire-and-forget, not awaited)
+  onError?    (err) => fallback data (passed to component as props in error path)
+  validateParams? (params) => boolean (reject malformed params, falls through to next route)
 
 RequestContext:
   params    Record<string, string>
@@ -61,7 +66,13 @@ RequestContext:
   env       Record<string, unknown>
   config    Record<string, unknown> (cached global config)
 
-createConfigLoader(fetcher, cacheKey?, ttl?) -> { load, reset }
+createConfigLoader(fetcher, options?) -> { load, reset }
+  options.cacheKey?              string (L2 Cache API key; default 'https://x15-engine/config')
+  options.ttl?                   number (L2 Cache-Control max-age seconds; default 3600)
+  options.maxConfigSize?         number (hard cap on config size in bytes)
+  options.configTimeout?        number (fetcher timeout in ms)
+  options.circuitBreakerCooldownMs? number (cooldown after failure; default 5000)
+  options.configTtl?             number (app-level freshness TTL in ms; stale-while-revalidate)
 detectMode(req) -> 'ssr' | 'csr'
 matchRoute(routes, pathname) -> { route, params } | null
 ssrTemplate(opts) -> HTML string
@@ -71,8 +82,8 @@ csrShell(opts) -> HTML string
 
 1. Mode detection: detectMode(req) checks query param, cookie, client hint, User-Agent
 2. If CSR (TV): return csrShell (empty #app div + TV JS/CSS links)
-3. If SSR (web): call route.getData(ctx), render component to string, wrap in ssrTemplate
-4. SSR errors: route.onError provides fallback data, component re-renders with error data
+3. If SSR (web): call route.getData(ctx), pass result as { data } props to component, renderToString, wrap in ssrTemplate
+4. SSR errors: route.onError provides fallback data, component re-renders with { data: errorData } props
 5. /api/data/*: matches route, calls getData with mode='csr', returns JSON
 6. /api/config: returns cached global config as JSON (only if configLoader provided)
 7. Static assets: served if serveStatic option provided (skipped on Workers)
@@ -81,29 +92,25 @@ csrShell(opts) -> HTML string
 
 L1: in-memory, instant, deduplicates concurrent calls via shared pending promise
 L2: Cache API (caches.default), survives isolate restarts on Workers
+configTtl: when set, serves stale + triggers background refresh from origin after TTL expires
+Circuit breaker: fail-fast during cooldown after fetch failure, retries after cooldown
 Failure: pending promise cleared, next call retries (no stale rejection cached)
 reset(): clears L1 only, L2 expires via TTL
 
 ## Mode detection priority
 
 1. ?tv=1 or ?web=1 query param
-2. tv-mode=1 or tv-mode=0 cookie
+2. tv-mode=1 or tv-mode=0 cookie (proper cookie parsing, not regex substring)
 3. Sec-CH-UA-Platform header (TV keyword)
 4. User-Agent keyword (tizen, webos, roku, appletv, etc.)
 Default: 'ssr'
 
-## Testing
-
-Run: npm test (uses node:test runner)
-99 tests across 8 files
-DST suite: seeded PRNG, reproducibility checks, independent reference model
-Stress suite: 3MB config payloads, concurrent requests, OOM checks
-
 ## Key constraints
 
+Component receives data as props: { data: Partial<TState> }. No module-level state.
 getData must return only page-specific data, NOT the full ctx.config
 __DATA__ is escaped: </script> replaced with <\/script>
-maxDataSize throws in production, warns in dev (100KB threshold)
+maxDataSize throws when exceeded; warns on >100KB only when dev:true (no NODE_ENV sniff)
 serveStatic is optional: Workers uses wrangler [assets] config instead
 No wildcards in routes, no regex, first match wins
 Malformed percent-encoding returns null, never crashes
@@ -112,7 +119,6 @@ Malformed percent-encoding returns null, never crashes
 
 hono ^4.0.0 (peer)
 preact ^10.0.0 (peer)
-@preact/signals ^1.0.0 (peer)
 @hono/node-server ^2.0.0 (optional peer, Node/Bun only)
 preact-render-to-string ^6.5.0 (dependency)
 

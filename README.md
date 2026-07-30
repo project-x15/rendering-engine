@@ -187,7 +187,7 @@ Returns a Hono app. The app handles four kinds of requests.
 |---|---|---|
 | `routes` | required | Array of route objects |
 | `title` | `''` | HTML `<title>` |
-| `headContent` | `''` | Extra `<head>` content (fonts, meta, analytics) |
+| `headContent` | `''` | Extra `<head>` content (fonts, meta, analytics). Interpolated **raw** — app-controlled build-time content only; never user-derived (XSS) |
 | `assetsRoot` | `'./dist'` | Root directory for static assets |
 | `webCssPath` | `'/web/assets/style.css'` | Web CSS path |
 | `webJsPath` | `'/web/assets/client.js'` | Web JS path |
@@ -197,36 +197,47 @@ Returns a Hono app. The app handles four kinds of requests.
 | `detectMode` | built-in detector | Override mode detection |
 | `getEnv` | `() => ({})` | Resolve per-request env |
 | `configLoader` | none | Async config fetcher; receives an optional `AbortSignal` for timeout cancellation |
+| `configTtl` | undefined | App-level config freshness TTL in ms. When stale, serves cached + background refresh |
 | `maxDataSize` | 524288 (512KB) | Hard cap on `__DATA__` in bytes. Set to `Infinity` to disable |
+| `dev` | `false` | When true, warns on `__DATA__` over 100KB. Environment-agnostic (no `process.env` check) |
 | `serveStatic` | none | Static asset middleware factory (Node, Bun, Deno) |
+| `securityHeaders` | `{ 'X-Content-Type-Options': 'nosniff' }` | Security headers on all responses. Set `false` to disable. Provide a record to merge with defaults |
+| `logger` | `console` | Structured logger. Interface: `info/warn/error(message, fields?)`. Fields: `requestId`, `route`, `path`, `durationMs`, `error` |
 
 ### Route object
 
 ```ts
 {
   path: '/show/:id',
-  component: ShowPage,
+  component: ShowPage,  // receives { data: Partial<TState> } as props
   getData: (ctx) => fetchShow(ctx.params.id),
-  beforeRender: (data) => trackAnalytics(data),
+  beforeRender: (data) => trackAnalytics(data),  // side effects only
   onError: (err) => ({ error: err.message }),
 }
 ```
 
+`component` receives the data from `getData` as props: `{ data }`. This is the only data-passing mechanism during SSR. Each request has its own props closure, so concurrent requests on the same isolate cannot clobber each other's data. Do not use `beforeRender` to set module-level state that the component reads during render.
+
 `getData` receives a `RequestContext` with `params`, `request`, `mode`, `env`, and `config`. Return only the data the page needs. Returning the full config object embeds megabytes into every HTML response.
 
-`beforeRender` runs after data is fetched but before the component renders. Use it for side effects like analytics. If it throws, the error is logged and the render continues — a failing analytics call does not take down the page.
+`beforeRender` runs after data is fetched but before the component renders. Use it for side effects like analytics. It may be sync or async — the engine does **not** await it (fire-and-forget), so a slow hook cannot delay the SSR response. A sync throw or a rejected promise is logged and isolated; the render always continues. On serverless runtimes the isolate may be torn down once the response is flushed, so don't rely on async work completing after the response.
 
 `onError` catches errors from `getData`. Return a fallback data object. Without it, the engine renders `{ error: message }`.
 
-### `createConfigLoader(fetcher, cacheKey?, ttl?)`
+### `createConfigLoader(fetcher, options?)`
 
 Creates a config loader with two cache layers. L1 is an in-memory cache that deduplicates concurrent calls, and L2 is the Cache API, which survives isolate restarts on Cloudflare Workers. On Node.js, Bun, and Deno, only L1 is available.
 
 ```ts
-const loader = createConfigLoader(async () => fetchConfig())
+const loader = createConfigLoader(
+  async (signal) => fetchConfig(signal),
+  { configTtl: 60_000 }  // refresh after 60s (stale-while-revalidate)
+)
 const config = await loader.load()  // cached after first call
 loader.reset()                       // clear L1, force refetch
 ```
+
+Options: `cacheKey`, `ttl` (L2 max-age), `maxConfigSize`, `configTimeout`, `circuitBreakerCooldownMs`, `configTtl`, `logger`.
 
 ### `detectMode(req)`
 
@@ -248,7 +259,7 @@ The config loader uses a two-layer cache. L1 is an in-memory reference that make
 
 Concurrent calls to `load()` share a single pending promise. The first call fetches, the rest wait for the same result. If the fetch fails, the pending promise is cleared so the next call retries instead of returning a stale rejection.
 
-The `reset()` method clears L1 only. L2 expires via its TTL or is overwritten on the next successful fetch.
+The `reset()` method clears L1 only. L2 serves the last-known-good entry until it is externally evicted. The `ttl` option is a Cache API eviction hint, not app-level freshness. When `configTtl` is set, the loader serves stale cached config immediately and triggers a non-blocking background refresh from origin after the TTL expires — stale-while-revalidate. A fetch failure during the cooldown fails fast instead of hammering the origin; when L2 is populated it serves the last-known-good config through outages.
 
 ---
 
@@ -266,4 +277,4 @@ This catches bugs that unit tests miss: race conditions in the config dedup, sta
 
 It doesn't build your client bundle, handle auth or sessions, or give you a CLI, dev server, or plugin system. It renders pages and serves data. That's it.
 
-The engine is 530 lines across seven files. Every line earns its keep.
+The engine is ~920 lines across seven files. Every line earns its keep.

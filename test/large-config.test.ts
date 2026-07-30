@@ -85,11 +85,7 @@ function buildLargeConfig(targetBytes = 3_000_000): Record<string, unknown> {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-function extractDataJson(html: string): unknown {
-  const m = html.match(/<script id="__DATA__" type="application\/json">([\s\S]*?)<\/script>/)
-  if (!m) throw new Error('no __DATA__ in HTML')
-  return JSON.parse(m[1].replace(/<\\\/script>/g, '</script>'))
-}
+import { extractDataJson, mockCacheApi } from './helpers.js'
 
 function measureMs(fn: () => void): number {
   const start = performance.now()
@@ -365,23 +361,6 @@ test('large-config: /api/data with params still works', async () => {
 //  5. L2 Cache API with large payload
 // ═══════════════════════════════════════════════════════════════════════
 
-function mockCacheApi(): { cleanup: () => void } {
-  const store = new Map<string, Response>()
-  ;(globalThis as any).caches = {
-    default: {
-      match: (key: string) => {
-        const val = store.get(key)
-        if (!val) return Promise.resolve(undefined)
-        return Promise.resolve(val.clone())
-      },
-      put: (key: string, res: Response) => {
-        store.set(key, res)
-        return Promise.resolve()
-      },
-    },
-  }
-  return { cleanup: () => { delete (globalThis as any).caches; store.clear() } }
-}
 
 test('large-config: L2 Cache API round-trip with 3MB', async () => {
   const mock = mockCacheApi()
@@ -460,7 +439,8 @@ test('large-config: ssrTemplate with large data produces valid HTML', () => {
     })
     // Verify HTML structure
     assert.ok(html.startsWith('<!DOCTYPE html>'), 'must start with doctype')
-    assert.ok(html.includes('<div id="app"><p>hello</p></div>'), 'must contain rendered content')
+    assert.ok(html.includes('data-ssr="true"'), 'must have data-ssr attribute')
+    assert.ok(html.includes('<p>hello</p>'), 'must contain rendered content')
     assert.ok(html.includes('__DATA__'), 'must contain __DATA__')
     // The data doesn't naturally contain </script>, so the replace is a no-op.
     // Verify the escape mechanism works by checking the __DATA__ content directly:

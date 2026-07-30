@@ -1,10 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ssrTemplate, csrShell } from '../src/html.js'
+import { captureConsoleWarn } from './helpers.js'
 
 test('ssrTemplate: wraps rendered HTML in #app', () => {
   const html = ssrTemplate({ html: '<p>hi</p>', data: {}, cssPath: '/a.css', jsPath: '/b.js' })
-  assert.ok(html.includes('<div id="app"><p>hi</p></div>'))
+  assert.ok(html.includes('<div id="app" data-ssr="true"><p>hi</p></div>'))
 })
 
 test('ssrTemplate: serializes data in __DATA__', () => {
@@ -75,4 +76,58 @@ test('csrShell: injects headContent into head', () => {
     headContent: '<meta name="theme-color" content="#ff0000">',
   })
   assert.ok(html.includes('<meta name="theme-color" content="#ff0000">'))
+})
+
+// ── dev option (replaces process.env.NODE_ENV sniffing) ──────────────────
+//
+// The large-__DATA__ warning is gated on an explicit `dev` flag, not on
+// process.env.NODE_ENV. This keeps html.ts environment-agnostic — the only
+// runtime-environment check in the codebase is removed.
+
+const big = { x: 'a'.repeat(150_000) } // ~150KB — over the 100KB warn threshold
+
+test('ssrTemplate: dev:true warns when __DATA__ exceeds threshold', () => {
+  const cap = captureConsoleWarn()
+  try {
+    ssrTemplate({ html: '', data: big, cssPath: '/a.css', jsPath: '/b.js', dev: true, routePath: '/big' })
+    const warned = cap.messages.some((m) => /SSR __DATA__ is/.test(m))
+    assert.ok(warned, 'dev:true should warn on large __DATA__')
+  } finally {
+    cap.restore()
+  }
+})
+
+test('ssrTemplate: dev:false does not warn (no env sniffing)', () => {
+  const cap = captureConsoleWarn()
+  try {
+    ssrTemplate({ html: '', data: big, cssPath: '/a.css', jsPath: '/b.js', dev: false, routePath: '/big' })
+    const warned = cap.messages.some((m) => /SSR __DATA__ is/.test(m))
+    assert.ok(!warned, 'dev:false must not warn regardless of NODE_ENV')
+  } finally {
+    cap.restore()
+  }
+})
+
+test('ssrTemplate: dev unset does not warn (default off, env-agnostic)', () => {
+  const cap = captureConsoleWarn()
+  try {
+    ssrTemplate({ html: '', data: big, cssPath: '/a.css', jsPath: '/b.js', routePath: '/big' })
+    const warned = cap.messages.some((m) => /SSR __DATA__ is/.test(m))
+    assert.ok(!warned, 'no dev option → no warning (env-agnostic)')
+  } finally {
+    cap.restore()
+  }
+})
+
+test('ssrTemplate: maxDataSize hard cap throws regardless of dev', () => {
+  // The hard cap is independent of dev — it protects production responses.
+  const cap = captureConsoleWarn()
+  try {
+    assert.throws(
+      () => ssrTemplate({ html: '', data: big, cssPath: '/a.css', jsPath: '/b.js', dev: false, maxDataSize: 1024, routePath: '/big' }),
+      /exceeds limit/,
+    )
+  } finally {
+    cap.restore()
+  }
 })

@@ -11,10 +11,12 @@ import type { Logger } from './types.js'
  *
  * Dedup: concurrent calls share the same pending promise (L1 only).
  *
- * Circuit breaker: after a fetch failure, the loader enters a 5-second cooldown.
- * During cooldown, stale L2 data is served if available. After cooldown,
- * the next request retries the fetcher. This prevents hammering a dead config
- * server while still recovering automatically when it comes back.
+ * Circuit breaker: after a fetch failure, the loader enters a cooldown.
+ * During cooldown it fails fast instead of retrying the fetcher, then retries
+ * after the cooldown elapses — preventing hammering a dead config server while
+ * recovering automatically. When L2 is populated it short-circuits the fetcher
+ * and serves the last-known-good config, so the breaker only governs the
+ * cold-start (L2-empty) outage.
  *
  * On Cloudflare Workers, the Cache API has a 4MB per-entry limit.
  * Configs larger than 4MB will not persist across isolate restarts (L2).
@@ -29,7 +31,14 @@ export interface ConfigLoader<T> {
 export interface ConfigLoaderOptions {
   /** Cache key for L2 (Cache API). Default: 'https://x15-engine/config' */
   cacheKey?: string
-  /** L2 Cache-Control max-age in seconds. Default: 3600 */
+  /**
+   * L2 Cache-Control max-age (seconds) set on the stored Response. Default: 3600.
+   *
+   * This is a Cache API eviction hint, NOT app-level freshness: the loader
+   * serves the last L2 entry until it is externally evicted; it does not
+   * revalidate on age. If you need periodic refresh from origin, call reset()
+   * (or clear L2 externally).
+   */
   ttl?: number
   /**
    * Hard cap on config size in bytes.
@@ -48,12 +57,25 @@ export interface ConfigLoaderOptions {
   /** Logger for diagnostics. Defaults to console. */
   logger?: Logger
   /**
-   * Circuit breaker cooldown in ms after a fetch failure.
-   * During cooldown, stale L2 cache is served if available.
-   * Set to 0 to disable (immediate retry on every request).
-   * Default: 5000.
+   * Circuit breaker cooldown in ms after a config fetch failure.
+   * During cooldown the loader fails fast instead of retrying the fetcher.
+   * (When L2 is populated it serves the last-known-good config regardless.)
+   * Set to 0 to disable (immediate retry on every request). Default: 5000.
    */
   circuitBreakerCooldownMs?: number
+  /**
+   * App-level freshness TTL in milliseconds.
+   *
+   * When set, the loader serves cached config instantly while fresh (within
+   * TTL). When stale (past TTL), it serves the stale value immediately AND
+   * triggers a non-blocking background refresh from origin. The caller never
+   * waits for the refresh — they get the stale value instantly. The next
+   * load() after the refresh completes gets the fresh value. If the
+   * background refresh fails, the stale value persists.
+   *
+   * Default: undefined (no TTL, cache is always fresh until reset()).
+   */
+  configTtl?: number
 }
 
 // Cloudflare Workers extends CacheStorage with a 'default' Cache instance.
@@ -80,11 +102,13 @@ export function createConfigLoader<T>(
 
   let cached: T | null = null
   let pending: Promise<T> | null = null
+  let cachedAt = 0
 
-  // Circuit breaker state
   const COOLDOWN_MS = cooldownMs
   let failureCount = 0
   let lastFailureTime = 0
+
+  const freshnessTtl = options?.configTtl
 
   async function loadFromCacheApi(): Promise<T | null> {
     if (!hasCacheApi()) return null
@@ -102,8 +126,8 @@ export function createConfigLoader<T>(
     const sizeMB = (sizeBytes / 1024 / 1024).toFixed(2)
     if (sizeBytes > 3_000_000) {
       logger.warn(
-        `config: size ${sizeMB}MB exceeds 3MB — ` +
-        `Cache API (L2) may reject entries >4MB`
+        'config: size exceeds 3MB — Cache API (L2) may reject entries >4MB',
+        { sizeMB: Number(sizeMB) }
       )
     }
 
@@ -116,26 +140,18 @@ export function createConfigLoader<T>(
     await (caches as WorkerCacheStorage).default.put(cacheKey, res)
   }
 
-  // Circuit breaker: if in cooldown, serve stale L2 or fail fast.
-  // Returns stale data if served, or null to proceed with a fresh fetch.
-  async function checkCircuitBreaker(): Promise<T | null> {
+  // Circuit breaker: fail fast during cooldown, then retry after it expires.
+  // When L2 (Cache API) is populated it short-circuits the fetcher in load()
+  // before this runs, so the breaker only governs the cold-start (L2-empty)
+  // outage — fail fast instead of hammering a dead config server, then retry
+  // once the cooldown elapses.
+  async function checkCircuitBreaker(): Promise<null> {
     if (failureCount === 0) return null
     const elapsed = Date.now() - lastFailureTime
     if (elapsed >= COOLDOWN_MS) {
       failureCount = 0
       return null
     }
-    const stale = await loadFromCacheApi()
-    if (stale !== null) {
-      logger.warn(
-        `config: in cooldown (${Math.round((COOLDOWN_MS - elapsed) / 1000)}s), ` +
-        `serving stale L2 cache`
-      )
-      cached = stale
-      pending = null
-      return stale
-    }
-    pending = null
     throw new Error(
       `config: fetcher is in cooldown (${Math.round((COOLDOWN_MS - elapsed) / 1000)}s remaining) ` +
       `after ${failureCount} failure(s)`
@@ -167,7 +183,6 @@ export function createConfigLoader<T>(
     return fetcher()
   }
 
-  // Check config size against maxConfigSize limit. Throws if exceeded.
   function checkSize(config: T): void {
     if (maxConfigSize === undefined) return
     const json = JSON.stringify(config)
@@ -181,55 +196,79 @@ export function createConfigLoader<T>(
     )
   }
 
+  // Background refresh: fetch from origin without blocking the caller.
+  // Used by stale-while-revalidate when configTtl is set and the L1 cache
+  // is stale. Skips L2 (it holds the same stale value). Respects the circuit
+  // breaker. On success updates L1 + L2 + cachedAt. On failure records the
+  // breaker failure but the stale L1 value persists.
+  function refreshInBackground(): void {
+    if (pending !== null) return // already fetching or refreshing
+    pending = (async () => {
+      await checkCircuitBreaker()
+      try {
+        const config = await fetchFromOrigin()
+        checkSize(config)
+        storeInCacheApi(config).catch((err) => logger.warn('config: L2 cache write failed', { error: err }))
+        cached = config
+        cachedAt = Date.now()
+        return config
+      } catch (err) {
+        failureCount++
+        lastFailureTime = Date.now()
+        throw err
+      }
+    })()
+    pending.then(() => { pending = null }, () => { pending = null })
+  }
+
   function load(): Promise<T> {
-    if (cached !== null) return Promise.resolve(cached)
+    if (cached !== null) {
+      // Stale-while-revalidate: if past TTL, serve stale + refresh in background
+      if (freshnessTtl !== undefined && Date.now() - cachedAt >= freshnessTtl) {
+        refreshInBackground()
+      }
+      return Promise.resolve(cached)
+    }
     if (pending !== null) return pending
 
     pending = (async () => {
-      // Circuit breaker: if in cooldown, serve stale or fail fast
-      const breakerResult = await checkCircuitBreaker()
-      if (breakerResult !== null) return breakerResult
+      // Fail fast during cooldown (cold-start outage, L2 empty). When L2 is
+      // populated it short-circuits below before the fetcher runs.
+      await checkCircuitBreaker()
 
       try {
         // L2: Cache API (survives isolate restart on Workers)
         const fromCache = await loadFromCacheApi()
         if (fromCache !== null) {
           cached = fromCache
-          pending = null
+          cachedAt = Date.now()
           return fromCache
         }
 
-        // Cache miss — fetch from origin
         const config = await fetchFromOrigin()
 
-        // Check maxConfigSize after fetch, before storing in cache
         checkSize(config)
 
         // Store in L2 (Cache API) — fire and forget, but surface failures
-        storeInCacheApi(config).catch((err) => logger.warn('config: L2 cache write failed', err))
+        storeInCacheApi(config).catch((err) => logger.warn('config: L2 cache write failed', { error: err }))
 
         cached = config
-        pending = null
+        cachedAt = Date.now()
         return config
       } catch (err) {
-        // Circuit breaker: record failure, try stale L2 before giving up
+        // Record the failure so the breaker fails fast on the next request
+        // during cooldown. Last-known-good serving during outages is handled
+        // by the L2 short-circuit above, not here.
         failureCount++
         lastFailureTime = Date.now()
-
-        const stale = await loadFromCacheApi()
-        if (stale !== null) {
-          logger.warn('config: fetch failed, serving stale L2 cache', err)
-          cached = stale
-          pending = null
-          return stale
-        }
-
-        // No stale data — clear pending so next request retries
-        pending = null
         throw err
       }
     })()
 
+    // Clear the in-flight slot once it settles so the next load proceeds (and
+    // rechecks cache/breaker) instead of deduping onto a settled promise. Done
+    // in one place rather than at every return/throw inside the IIFE.
+    pending.then(() => { pending = null }, () => { pending = null })
     return pending
   }
 
@@ -237,6 +276,7 @@ export function createConfigLoader<T>(
     // Clears L1 only. L2 (Cache API) expires via TTL or is overwritten on next fetch.
     cached = null
     pending = null
+    cachedAt = 0
   }
 
   return { load, reset }

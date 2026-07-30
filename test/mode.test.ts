@@ -49,3 +49,21 @@ test('detectMode: no headers → SSR (default)', () => {
 test('detectMode: ?tv=1 takes priority over cookie tv-mode=0', () => {
   assert.equal(detectMode(req('/?tv=1', { cookie: 'tv-mode=0' })), 'csr')
 })
+
+test('detectMode: not-tv-mode=1 cookie must NOT trigger CSR (word-boundary)', () => {
+  // Regression: /tv-mode=1/.test('not-tv-mode=1') was true with unanchored regex.
+  // A cookie named 'not-tv-mode' must not be mistaken for 'tv-mode'.
+  assert.equal(detectMode(req('/', { cookie: 'not-tv-mode=1' })), 'ssr')
+})
+
+test('detectMode: tv-mode=1 among other cookies forces CSR', () => {
+  assert.equal(detectMode(req('/', { cookie: 'session=abc; tv-mode=1; pref=dark' })), 'csr')
+})
+
+test('detectMode: tv-mode=0 among other cookies forces SSR', () => {
+  assert.equal(detectMode(req('/', { cookie: 'session=abc; tv-mode=0; pref=dark' })), 'ssr')
+})
+
+test('detectMode: cookie with similar prefix (xtv-mode=1) must NOT trigger CSR', () => {
+  assert.equal(detectMode(req('/', { cookie: 'xtv-mode=1' })), 'ssr')
+})
